@@ -20,13 +20,19 @@ class JevClient(prefs: Prefs) {
     fun judge(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext? = null): Analysis =
         judgeClient.judge(snapshot, relationship, ctx)
 
-    /** Draft 3 candidates on the reply route, then rank them on the judge route. */
+    /**
+     * Draft 3 candidates on the reply route, then rank them on the judge route.
+     * [onDrafted] fires (on the calling thread) between the two halves so the
+     * caller can advance its progress indicator.
+     */
     fun draftAndRank(
         snapshot: ChatSnapshot,
         relationship: String,
-        ctx: ChatContext? = null
+        ctx: ChatContext? = null,
+        onDrafted: ((List<String>) -> Unit)? = null
     ): List<RankedReply> {
         val candidates = replyClient.draft(snapshot, relationship, ctx)
+        onDrafted?.invoke(candidates)
         return judgeClient.rank(snapshot, relationship, candidates, ctx)
     }
 

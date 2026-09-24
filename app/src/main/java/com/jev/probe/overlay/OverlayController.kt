@@ -359,23 +359,54 @@ class OverlayController(private val ctx: Context) {
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
         replyError = null              // this round has not failed (yet)
         val v = hint(label)
-        setContent(listOf(v))          // also stops any previous ticker
+        val bar = loadingBar()
+        setContent(listOf(v, bar))      // also stops any previous ticker
         loadingView = v; loadingBase = label; loadingStarted = System.currentTimeMillis()
+        loadingBarRef = bar; loadingCap = 40   // first stage ceiling; ticker creeps toward it
         tickHandler.postDelayed(tick, 1000)
         if (!expanded) toggle()
     }
 
-    // Elapsed-seconds ticker on the loading line: a static "分析中…" that sits
-    // there for 30 slow seconds reads as frozen; "分析中… 12s" reads as alive.
+    /**
+     * One pipeline stage finished: jump the bar to [pct] (0..100), relabel the
+     * stage, and let the ticker keep creeping toward the next milestone so the
+     * bar never looks stuck mid-stage. No-op unless the loading line is on
+     * screen (i.e. between [showLoading] and the result panel).
+     */
+    fun setLoadingProgress(pct: Int, label: String? = null) {
+        val bar = loadingBarRef ?: return
+        bar.progress = pct.coerceIn(0, 100)
+        loadingCap = (pct + 30).coerceAtMost(92)
+        if (label != null) { loadingBase = label; loadingView?.text = label }
+    }
+
+    private fun loadingBar() = android.widget.ProgressBar(ctx, null,
+        android.R.attr.progressBarStyleHorizontal).apply {
+        max = 100; progress = 4
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { topMargin = dp(6) }
+    }
+
+    // Loading line ticker: appends elapsed seconds to the stage label and creeps
+    // the progress bar toward [loadingCap] — a static line that sits for 30 slow
+    // seconds reads as frozen, "分析中·判断 12s ▓▓▓░░" reads as alive.
     private val tickHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var loadingBase: String? = null
     private var loadingStarted = 0L
     private var loadingView: TextView? = null
+    private var loadingBarRef: android.widget.ProgressBar? = null
+    private var loadingCap = 40
     private val tick: Runnable = object : Runnable {
         override fun run() {
             val b = loadingBase ?: return
             val el = (System.currentTimeMillis() - loadingStarted) / 1000
             loadingView?.text = "$b ${el}s"
+            val bar = loadingBarRef
+            if (bar != null && bar.progress < loadingCap) {
+                bar.progress = (bar.progress + maxOf(1, (loadingCap - bar.progress) / 8))
+                    .coerceAtMost(loadingCap)
+            }
             tickHandler.postDelayed(this, 1000)
         }
     }
@@ -491,9 +522,12 @@ class OverlayController(private val ctx: Context) {
 
     // --------------------------------------------------------------- rendering
 
-    private fun setContent(views: List<View>) {
-        loadingBase = null              // whatever comes next, loading is over
-        tickHandler.removeCallbacks(tick)
+    private fun setContent(views: List<View>, keepTicker: Boolean = false) {
+        if (!keepTicker) {             // whatever comes next, loading is over
+            loadingBase = null
+            loadingBarRef = null
+            tickHandler.removeCallbacks(tick)
+        }
         val c = contentBox ?: return
         c.removeAllViews(); views.forEach { c.addView(it) }
     }
@@ -533,7 +567,13 @@ class OverlayController(private val ctx: Context) {
         views.add(divider())
         views.add(line("候选回复（Jev 排序）", "#9CA3AF", 12f))
         if (generating) {
-            views.add(hint("生成中…"))
+            // Judgment is on screen and candidates are still being drafted: keep
+            // the progress bar alive under the judgment block (same ticker, same
+            // elapsed clock) instead of a frozen "生成中…" line.
+            val lb = hint("生成候选中…")
+            val bar = loadingBar().apply { progress = 45 }
+            views.add(lb); views.add(bar)
+            loadingView = lb; loadingBase = "生成候选中…"; loadingBarRef = bar; loadingCap = 85
         } else {
             val fill = lastFill ?: {}
             a.rankedReplies.forEachIndexed { i, r ->
@@ -546,7 +586,7 @@ class OverlayController(private val ctx: Context) {
         }
         views.add(reAnalyzeBtn())
 
-        setContent(views)
+        setContent(views, keepTicker = generating)
         if (!expanded) toggle()
     }
 

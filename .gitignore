@@ -47,3 +47,6 @@ apikey.toml
 *.jks
 *.keystore
 keystore.properties
+
+# understand-anything scratch
+.understand-anything/tmp/

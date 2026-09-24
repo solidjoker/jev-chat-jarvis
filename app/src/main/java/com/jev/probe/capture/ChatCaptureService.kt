@@ -301,7 +301,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (analyzing) return
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
-        main.post { overlay?.showLoading("沙盘推理中…"); overlay?.setNote(snapshot.note) }
+        main.post { overlay?.showLoading("沙盘推理·起草"); overlay?.setNote(snapshot.note) }
         val client = JevClient(prefs)
         val rel = prefs.relationship
         val pkg = activePkg ?: ""
@@ -313,7 +313,12 @@ open class ChatCaptureService : AccessibilityService() {
             }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
             var err: String? = null
-            val ranked = try { client.draftAndRank(snapshot, rel, ctx) } catch (e: Exception) {
+            val ranked = try {
+                client.draftAndRank(snapshot, rel, ctx) {
+                    // Drafts are in; Jev ranking them now — the bar's second stage.
+                    main.post { overlay?.setLoadingProgress(55, "沙盘推理·排序") }
+                }
+            } catch (e: Exception) {
                 err = e.message ?: e.javaClass.simpleName; emptyList<RankedReply>()
             }
             val e2 = err
@@ -439,7 +444,7 @@ open class ChatCaptureService : AccessibilityService() {
         if (analyzing) return
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
-        main.post { overlay?.showLoading(); overlay?.setNote(snapshot.note) }
+        main.post { overlay?.showLoading("分析中·判断"); overlay?.setNote(snapshot.note) }
         val client = JevClient(prefs)
         val rel = prefs.relationship
         val pkg = activePkg ?: ""
@@ -454,7 +459,8 @@ open class ChatCaptureService : AccessibilityService() {
             }
             main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
 
-            // Judgment is fast (~1s) — show it immediately.
+            // Judgment is fast (~1s) — show it immediately; its arrival moves
+            // the progress bar into the candidate phase inside render().
             submit {
                 val judgment = client.judge(snapshot, rel, ctx)
                 main.post {
@@ -465,7 +471,11 @@ open class ChatCaptureService : AccessibilityService() {
             // Candidate replies are slower (generative + rank) — fill in when ready.
             submit {
                 var replyError: String? = null
-                val ranked = try { client.draftAndRank(snapshot, rel, ctx) } catch (e: Exception) {
+                val ranked = try {
+                    client.draftAndRank(snapshot, rel, ctx) {
+                        main.post { overlay?.setLoadingProgress(60) }
+                    }
+                } catch (e: Exception) {
                     replyError = e.message ?: e.javaClass.simpleName
                     emptyList()
                 }
