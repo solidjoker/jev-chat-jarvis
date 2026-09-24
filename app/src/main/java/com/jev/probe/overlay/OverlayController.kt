@@ -177,6 +177,8 @@ class OverlayController(private val ctx: Context) {
         })
         header.addView(iconBtn("⚙") { openSettings() })
         header.addView(iconBtn("✕") { toggle() })
+        // The header doubles as the panel's drag handle.
+        attachPanelDrag(header)
         p.addView(header)
 
         val scroll = ScrollView(ctx).apply {
@@ -234,6 +236,48 @@ class OverlayController(private val ctx: Context) {
                     } else { toggle(); true }
                 }
                 MotionEvent.ACTION_CANCEL -> { v.removeCallbacks(longPress); true }
+                else -> false
+            }
+        }
+    }
+
+    /**
+     * Drag handle on the panel header: dragging moves the whole window (panel
+     * and bubble live in one root view). The header's ⚙/✕ buttons keep working
+     * — a clickable child consumes its own touches, so the handle only sees
+     * touches that start on the title or the header's empty areas. On drop the
+     * position becomes both the remembered collapse spot and the persisted
+     * bubble spot, so collapsing and the next session both reopen where the
+     * user left the panel instead of snapping back.
+     */
+    private fun attachPanelDrag(v: View) {
+        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f
+        v.setOnTouchListener { _, e ->
+            val params = lp ?: return@setOnTouchListener false
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = params.x; startY = params.y
+                    touchX = e.rawX; touchY = e.rawY; true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    // Keep the whole 316dp panel on screen (a max lower than the
+                    // min would throw, so clamp the range itself on narrow
+                    // screens), away from the very top edge.
+                    params.x = (startX + (e.rawX - touchX).toInt())
+                        .coerceIn(dp(4), maxOf(dp(4), screenW - dp(320)))
+                    params.y = (startY + (e.rawY - touchY).toInt())
+                        .coerceIn(dp(24), maxOf(dp(24), screenH - dp(200)))
+                    root?.let { runCatching { wm.updateViewLayout(it, params) } }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    val moved = abs(params.x - startX) > dp(4) || abs(params.y - startY) > dp(4)
+                    if (moved) {
+                        collapsedX = params.x; collapsedY = params.y
+                        prefs.bubbleX = params.x; prefs.bubbleY = params.y
+                    }
+                    true
+                }
                 else -> false
             }
         }
