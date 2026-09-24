@@ -30,6 +30,16 @@ class JevClient(prefs: Prefs) {
         return judgeClient.rank(snapshot, relationship, candidates, ctx)
     }
 
+    /**
+     * Draft-only: the 3 candidates without Jev ranking (the panel's 回复
+     * button). Throws whatever the reply route throws; no judge call at all.
+     */
+    fun draftOnly(
+        snapshot: ChatSnapshot,
+        relationship: String,
+        ctx: ChatContext? = null
+    ): List<String> = replyClient.draft(snapshot, relationship, ctx)
+
     /** Judge + replies, sequential. Used by the settings connectivity test. */
     fun analyze(snapshot: ChatSnapshot, relationship: String, ctx: ChatContext? = null): Analysis {
         val a = judge(snapshot, relationship, ctx)

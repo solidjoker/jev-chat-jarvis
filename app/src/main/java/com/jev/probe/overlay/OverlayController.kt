@@ -55,6 +55,13 @@ class OverlayController(private val ctx: Context) {
     /** Bubble menu → one manual screenshot + OCR of whatever app is open. */
     var onOcrCapture: (() -> Unit)? = null
 
+    /** Panel → "沙盘": draft 3 candidates for the current chat and have Jev rank
+     *  them — the ranking half of the pipeline, without re-running judgment. */
+    var onSandbox: (() -> Unit)? = null
+
+    /** Panel → "回复": draft-only, no Jev ranking (reply route alone). */
+    var onReplies: (() -> Unit)? = null
+
     /** How much knowledge context the last analysis actually used. */
     private var ctxNotes = 0
     private var ctxHistory = 0
@@ -293,8 +300,32 @@ class OverlayController(private val ctx: Context) {
         // stale conversation) — either way an empty panel must never stay
         // literally blank.
         if (lastJudgment == null || contentBox?.childCount == 0) {
-            setContent(listOf(bigButton("分析当前对话") { onManualAnalyze?.invoke() }))
+            setContent(listOf(actionRow()))
         }
+    }
+
+    /**
+     * The panel's three side-by-side actions: 分析 = judgment + candidates (the
+     * full pipeline), 沙盘 = candidates drafted and Jev-ranked without judgment,
+     * 回复 = candidates drafted only. Each is separately tappable so a broken
+     * route (e.g. an out-of-balance reply account) never takes the others down.
+     */
+    private fun actionRow(): View {
+        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        fun btn(label: String, onClick: () -> Unit) = TextView(ctx).apply {
+            text = label; textSize = 14f; gravity = Gravity.CENTER
+            setTextColor(Color.WHITE); setTypeface(typeface, Typeface.BOLD)
+            background = card(12, Color.parseColor("#3A7AFE"))
+            setPadding(dp(6), dp(11), dp(6), dp(11))
+            layoutParams = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { val m = dp(3); setMargins(m, 0, m, 0) }
+            setOnClickListener { onClick() }
+        }
+        row.addView(btn("分析") { onManualAnalyze?.invoke() })
+        row.addView(btn("沙盘") { onSandbox?.invoke() })
+        row.addView(btn("回复") { onReplies?.invoke() })
+        return row
     }
 
     /**
@@ -323,11 +354,11 @@ class OverlayController(private val ctx: Context) {
         setOnClickListener { onClick() }
     }
 
-    fun showLoading() {
+    fun showLoading(label: String = "分析中…") {
         ensureRoot(); bubble?.alpha = 1f
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
         replyError = null              // this round has not failed (yet)
-        setContent(listOf(hint("分析中…")))
+        setContent(listOf(hint(label)))
         if (!expanded) toggle()
     }
 
@@ -383,6 +414,44 @@ class OverlayController(private val ctx: Context) {
         val a = lastJudgment?.copy(rankedReplies = ranked) ?: return
         lastJudgment = a
         render(a, generating = false)
+    }
+
+    /**
+     * The 沙盘 button's result: Jev-ranked candidates on their own. Merges into
+     * the standing judgment view when there is one (the usual case right after
+     * 分析), otherwise a standalone ranked list — never a silent no-op.
+     */
+    fun showSandbox(ranked: List<RankedReply>, error: String?, onFill: (String) -> Unit) {
+        if (lastJudgment != null) { showReplies(ranked, error, onFill); return }
+        lastFill = onFill
+        replyError = error
+        ensureRoot(); bubble?.alpha = 1f
+        val views = ArrayList<View>()
+        views.add(line("沙盘推理（Jev 排序）", "#111827", 15f, true))
+        noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
+        views.add(divider())
+        ranked.forEachIndexed { i, r ->
+            views.add(replyCard(i + 1, r.text, (r.prob * 100).roundToInt(), onFill))
+        }
+        if (ranked.isEmpty()) views.add(hint(error?.let { "失败：$it" } ?: "（无候选）"))
+        views.add(reAnalyzeBtn())
+        setContent(views)
+        if (!expanded) toggle()
+    }
+
+    /** The 回复 button's result: draft-only candidates, unranked, no Jev. */
+    fun showDrafts(candidates: List<String>, error: String?, onFill: (String) -> Unit) {
+        ensureRoot(); bubble?.alpha = 1f
+        lastFill = onFill
+        val views = ArrayList<View>()
+        views.add(line("候选回复（未排序）", "#111827", 15f, true))
+        noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
+        views.add(divider())
+        candidates.forEachIndexed { i, t -> views.add(replyCard(i + 1, t, -1, onFill)) }
+        if (candidates.isEmpty()) views.add(hint(error?.let { "回复接口出错：$it" } ?: "（未生成）"))
+        views.add(reAnalyzeBtn())
+        setContent(views)
+        if (!expanded) toggle()
     }
 
     fun toast(msg: String) = Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
@@ -482,7 +551,9 @@ class OverlayController(private val ctx: Context) {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6) }
         }
-        c.addView(TextView(ctx).apply {
+        // pct < 0 = unranked draft (the 回复 button): no "#rank · pct" header,
+        // a made-up percentage must never be shown.
+        if (pct >= 0) c.addView(TextView(ctx).apply {
             this.text = "#$rank · ${pct}%"; setTextColor(Color.parseColor("#3A7AFE")); textSize = 11f
             setTypeface(typeface, Typeface.BOLD)
         })

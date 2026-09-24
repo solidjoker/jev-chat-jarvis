@@ -16,6 +16,7 @@ import com.jev.probe.core.BubbleRect
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.RankedReply
 import com.jev.probe.core.kb.ContextBuilder
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.jev.JevClient
@@ -97,21 +98,17 @@ open class ChatCaptureService : AccessibilityService() {
         super.onServiceConnected()
         prefs = Prefs(this)
         overlay = OverlayController(this)
-        // Panel → "分析当前对话". currentSnapshot can be null here (fresh
-        // service start, WeChat's hidden tree with an empty notification
-        // buffer, the conversation list screen) — a dead button is exactly what
-        // a manual tap must never be, so take one fresh shot at reading the
-        // screen before giving up with a reason.
+        // Panel → the three side-by-side actions. currentSnapshot can be null
+        // here (fresh service start, WeChat's hidden tree with an empty
+        // notification buffer, the conversation list screen) — a dead button is
+        // exactly what a manual tap must never be, so each action goes through
+        // [runManualAction], which takes one fresh shot at reading the screen
+        // before giving up with a reason.
         overlay?.onManualAnalyze = {
-            val snap = currentSnapshot ?: grabSnapshotForManualAnalyze()
-            if (snap == null) {
-                overlay?.toast("没读到当前对话：先打开聊天窗口；微信可开「通知使用权」，对方来消息即可分析")
-            } else {
-                currentSnapshot = snap
-                pendingSnapshot = snap
-                runAnalysis()
-            }
+            runManualAction { snap -> pendingSnapshot = snap; runAnalysis() }
         }
+        overlay?.onSandbox = { runManualAction { snap -> runSandbox(snap) } }
+        overlay?.onReplies = { runManualAction { snap -> runReplies(snap) } }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
         overlay?.onSaveContact = {
@@ -279,7 +276,84 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     /**
-     * A fresh one-shot read backing the manual "分析当前对话" button when no
+     * Shared entry for the panel's three action buttons: resolve a snapshot
+     * (the one on file, else one fresh read via [grabSnapshotForManualAnalyze])
+     * and hand it to [action]; when nothing can be read, say why instead of
+     * sitting silently.
+     */
+    private fun runManualAction(action: (ChatSnapshot) -> Unit) {
+        val snap = currentSnapshot ?: grabSnapshotForManualAnalyze()
+        if (snap == null) {
+            overlay?.toast("没读到当前对话：先打开聊天窗口；微信可开「通知使用权」，对方来消息即可分析")
+        } else {
+            currentSnapshot = snap
+            action(snap)
+        }
+    }
+
+    /**
+     * The 沙盘 button: the ranking half of the pipeline — draft 3 candidates on
+     * the reply route, then have Jev rank them. Judgment is NOT re-run: a
+     * standing judgment (from 分析) gets the ranking merged in; without one the
+     * ranking stands alone on the panel.
+     */
+    private fun runSandbox(snapshot: ChatSnapshot) {
+        if (analyzing) return
+        if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
+        analyzing = true
+        main.post { overlay?.showLoading("沙盘推理中…"); overlay?.setNote(snapshot.note) }
+        val client = JevClient(prefs)
+        val rel = prefs.relationship
+        val pkg = activePkg ?: ""
+        submit {
+            val ctx = try {
+                ContextBuilder.build(this, snapshot, pkg, prefs)
+            } catch (e: Exception) {
+                Log.w(TAG, "context build failed: ${e.javaClass.simpleName}"); null
+            }
+            main.post { overlay?.setContextInfo(ctx?.notes?.size ?: 0, ctx?.history?.size ?: 0) }
+            var err: String? = null
+            val ranked = try { client.draftAndRank(snapshot, rel, ctx) } catch (e: Exception) {
+                err = e.message ?: e.javaClass.simpleName; emptyList<RankedReply>()
+            }
+            val e2 = err
+            main.post {
+                analyzing = false
+                overlay?.showSandbox(ranked, e2) { fillInput(it) }
+            }
+        }
+    }
+
+    /**
+     * The 回复 button: draft-only — the reply route alone, no Jev call at all.
+     * Works even when the judge route is unconfigured, and fails on its own
+     * when the reply account is out of balance (GLM error 1113) without
+     * touching the other two buttons.
+     */
+    private fun runReplies(snapshot: ChatSnapshot) {
+        if (analyzing) return
+        if (prefs.effectiveReplyKey().isBlank()) {
+            main.post { overlay?.showError("回复接口未配密钥（留空则用判断接口密钥）") }; return
+        }
+        analyzing = true
+        main.post { overlay?.showLoading("生成回复中…"); overlay?.setNote(snapshot.note) }
+        val client = JevClient(prefs)
+        val rel = prefs.relationship
+        submit {
+            var err: String? = null
+            val drafts = try { client.draftOnly(snapshot, rel) } catch (e: Exception) {
+                err = e.message ?: e.javaClass.simpleName; emptyList<String>()
+            }
+            val e2 = err
+            main.post {
+                analyzing = false
+                overlay?.showDrafts(drafts, e2) { fillInput(it) }
+            }
+        }
+    }
+
+    /**
+     * A fresh one-shot read backing the panel's manual action buttons when no
      * snapshot is on file. Same preference rules as the automatic path — WeChat
      * gated by its setting, whitelist respected — and WeChat still never gets
      * screenshotted: an unreadable tree falls back to the notification buffer.
@@ -701,6 +775,8 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
+        overlay?.onSandbox = null
+        overlay?.onReplies = null
         WeChatNotifyStore.onNewMessage = null
         overlay?.hide()
         overlay = null
