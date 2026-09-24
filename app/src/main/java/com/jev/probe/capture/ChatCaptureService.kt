@@ -284,11 +284,25 @@ open class ChatCaptureService : AccessibilityService() {
     private fun runManualAction(action: (ChatSnapshot) -> Unit) {
         val snap = currentSnapshot ?: grabSnapshotForManualAnalyze()
         if (snap == null) {
-            overlay?.toast("没读到当前对话：先打开聊天窗口；微信可开「通知使用权」，对方来消息即可分析")
+            // WeChat gets the guidance card (grant notification access, or the
+            // explanation that the open conversation must wait for a new
+            // message); everywhere else the short toast.
+            if (rootInActiveWindow?.packageName?.toString() == PKG_WECHAT)
+                overlay?.showWeChatNeedAccess(notificationListenerEnabled())
+            else overlay?.toast("没读到当前对话：先打开聊天窗口再试")
         } else {
             currentSnapshot = snap
             action(snap)
         }
+    }
+
+    /** Whether this app holds the notification-listener grant (WeChat's only
+     *  readable channel). Read straight from the secure setting, so a fresh
+     *  grant is reflected without a restart. */
+    private fun notificationListenerEnabled(): Boolean {
+        val raw = android.provider.Settings.Secure.getString(
+            contentResolver, "enabled_notification_listeners")
+        return raw?.contains(packageName) == true
     }
 
     /**
@@ -512,7 +526,7 @@ open class ChatCaptureService : AccessibilityService() {
             val snap = treeSnap?.takeIf { it.messages.isNotEmpty() }
                 ?: WeChatNotifyStore.snapshotFor(treeSnap?.title)
             if (snap == null) {
-                overlay?.toast("微信没读到正文；开启通知使用权后，对方新消息会自动分析")
+                overlay?.showWeChatNeedAccess(notificationListenerEnabled())
                 return
             }
             currentSnapshot = snap

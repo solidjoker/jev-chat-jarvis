@@ -357,6 +357,9 @@ class OverlayController(private val ctx: Context) {
      * full pipeline), 沙盘 = candidates drafted and Jev-ranked without judgment,
      * 回复 = candidates drafted only. Each is separately tappable so a broken
      * route (e.g. an out-of-balance reply account) never takes the others down.
+     * Rendered in EVERY panel state (idle / loading / judgment / results /
+     * error) — the buttons used to vanish the moment 分析 ran, which read as
+     * "沙盘和回复不见了".
      */
     private fun actionRow(): View {
         val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
@@ -408,7 +411,10 @@ class OverlayController(private val ctx: Context) {
         replyError = null              // this round has not failed (yet)
         val v = hint(label)
         val bar = loadingBar()
-        setContent(listOf(v, bar.view))     // also stops any previous ticker
+        // The action row stays on screen while loading: tapping another action
+        // mid-round now explains itself (上一轮还在进行) instead of the row
+        // vanishing and reading as broken.
+        setContent(listOf(actionRow(), divider(), v, bar.view))
         busyState = true                    // setContent cleared it; loading IS busy
         loadingView = v; loadingBase = label; loadingStarted = System.currentTimeMillis()
         loadingBarRef = bar; loadingCap = 40   // first stage ceiling; ticker creeps toward it
@@ -526,7 +532,7 @@ class OverlayController(private val ctx: Context) {
 
     fun showError(msg: String) {
         ensureRoot(); bubble?.alpha = 1f
-        setContent(listOf(
+        setContent(listOf(actionRow(), divider(),
             line("出错了", "#DC2626", 14f, true),
             hint(msg)))
     }
@@ -541,9 +547,39 @@ class OverlayController(private val ctx: Context) {
     fun showNotice(msg: String) {
         ensureRoot(); bubble?.alpha = 1f
         resetForNewConversation()
-        setContent(listOf(
+        setContent(listOf(actionRow(), divider(),
             line("提示", "#3A7AFE", 14f, true),
             hint(msg)))
+        if (!expanded) toggle()
+    }
+
+    /**
+     * WeChat-specific guidance card, shown instead of a dead-end toast when a
+     * manual action in WeChat cannot produce a snapshot. The chat screen hides
+     * its text from accessibility and this app never screenshots, so the ONLY
+     * channel is notifications — which need the user's grant, and which never
+     * fire for the conversation currently open in WeChat. The card says exactly
+     * that and offers the one-tap fix.
+     */
+    fun showWeChatNeedAccess(listenerEnabled: Boolean) {
+        ensureRoot(); bubble?.alpha = 1f
+        val views = ArrayList<View>()
+        views.add(actionRow())
+        views.add(divider())
+        views.add(line("微信读取", "#111827", 15f, true))
+        views.add(hint(if (listenerEnabled)
+            "通知读取已开启。正在微信里打开的会话不会有通知——退到手机桌面，等对方来一条新消息就会自动分析。"
+        else
+            "微信隐藏了控件文字，本应用也绝不截屏；开启「通知使用权」后，对方发来的新消息会自动分析。"))
+        views.add(bigButton(if (listenerEnabled) "知道了" else "去开启通知使用权") {
+            if (!listenerEnabled) runCatching {
+                ctx.startActivity(Intent(
+                    android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+            if (expanded) toggle()
+        })
+        setContent(views)
         if (!expanded) toggle()
     }
 
@@ -571,6 +607,7 @@ class OverlayController(private val ctx: Context) {
         replyError = error
         ensureRoot(); bubble?.alpha = 1f
         val views = ArrayList<View>()
+        views.add(actionRow()); views.add(divider())
         views.add(line("沙盘推理（Jev 排序）", "#111827", 15f, true))
         noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
         views.add(divider())
@@ -578,7 +615,6 @@ class OverlayController(private val ctx: Context) {
             views.add(replyCard(i + 1, r.text, (r.prob * 100).roundToInt(), onFill))
         }
         if (ranked.isEmpty()) views.add(hint(error?.let { "失败：$it" } ?: "（无候选）"))
-        views.add(reAnalyzeBtn())
         setContent(views)
         if (!expanded) toggle()
     }
@@ -588,12 +624,12 @@ class OverlayController(private val ctx: Context) {
         ensureRoot(); bubble?.alpha = 1f
         lastFill = onFill
         val views = ArrayList<View>()
+        views.add(actionRow()); views.add(divider())
         views.add(line("候选回复（未排序）", "#111827", 15f, true))
         noteText?.let { if (it.isNotBlank()) views.add(hint(it)) }
         views.add(divider())
         candidates.forEachIndexed { i, t -> views.add(replyCard(i + 1, t, -1, onFill)) }
         if (candidates.isEmpty()) views.add(hint(error?.let { "回复接口出错：$it" } ?: "（未生成）"))
-        views.add(reAnalyzeBtn())
         setContent(views)
         if (!expanded) toggle()
     }
@@ -624,6 +660,11 @@ class OverlayController(private val ctx: Context) {
         ensureRoot(); bubble?.alpha = 1f
         panel?.background = card(18, panelBg(), stroke = true) // re-apply in case opacity changed
         val views = ArrayList<View>()
+
+        // The action row leads every state so 沙盘/回复 never disappear while
+        // candidates are generating or results are on screen.
+        views.add(actionRow())
+        views.add(divider())
 
         // What context this read was based on (knowledge base / remembered history).
         views.add(hint(
@@ -672,7 +713,6 @@ class OverlayController(private val ctx: Context) {
                 views.add(hint(msg))
             }
         }
-        views.add(reAnalyzeBtn())
 
         setContent(views, keepTicker = generating)
         if (!expanded) toggle()
@@ -736,13 +776,6 @@ class OverlayController(private val ctx: Context) {
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { rightMargin = dp(8) }
         setOnClickListener { onClick() }
-    }
-
-    private fun reAnalyzeBtn() = TextView(ctx).apply {
-        text = "重新分析"; textSize = 13f; gravity = Gravity.CENTER
-        setTextColor(Color.parseColor("#6B7280"))
-        setPadding(dp(10), dp(10), dp(10), dp(4))
-        setOnClickListener { onManualAnalyze?.invoke() }
     }
 
     private fun tintBubbleDanger(score: Double) {
