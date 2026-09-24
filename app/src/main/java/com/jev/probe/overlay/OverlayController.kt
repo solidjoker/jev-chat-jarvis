@@ -337,6 +337,10 @@ class OverlayController(private val ctx: Context) {
     // ------------------------------------------------------------ public API
 
     fun showIdle(title: String?) {
+        // A round is running: its progress bar IS the panel's content right now.
+        // Chat apps fire content-changed events every second, and the idle
+        // refresh used to wipe the loading UI mid-round — reading as "点击没反应".
+        if (busyState) return
         ensureRoot(); bubble?.alpha = 0.55f
         // Either there is genuinely nothing to show yet, or the panel is empty
         // for some other reason (root got rebuilt after hide(), leaving
@@ -404,10 +408,11 @@ class OverlayController(private val ctx: Context) {
         replyError = null              // this round has not failed (yet)
         val v = hint(label)
         val bar = loadingBar()
-        setContent(listOf(v, bar))      // also stops any previous ticker
+        setContent(listOf(v, bar.view))     // also stops any previous ticker
+        busyState = true                    // setContent cleared it; loading IS busy
         loadingView = v; loadingBase = label; loadingStarted = System.currentTimeMillis()
         loadingBarRef = bar; loadingCap = 40   // first stage ceiling; ticker creeps toward it
-        tickHandler.postDelayed(tick, 1000)
+        tickHandler.postDelayed(tick, 500)
         if (!expanded) toggle()
     }
 
@@ -424,20 +429,47 @@ class OverlayController(private val ctx: Context) {
         if (label != null) { loadingBase = label; loadingView?.text = label }
     }
 
-    private fun loadingBar() = android.widget.ProgressBar(ctx, null,
-        android.R.attr.progressBarStyleHorizontal).apply {
-        max = 100; progress = 12
-        // Explicit tints + a fixed height: the theme-default bar is a hairline
-        // on the white panel (invisible on MIUI at low progress), which read as
-        // "no progress bar at all".
-        progressTintList = android.content.res.ColorStateList.valueOf(
-            Color.parseColor("#3A7AFE"))
-        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(
-            Color.parseColor("#E8EBF2"))
-        minHeight = dp(14); maxHeight = dp(14)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(14))
-            .apply { topMargin = dp(6) }
+    /**
+     * The progress bar, hand-rolled from two plain rounded Views (gray track +
+     * blue fill) instead of a themed ProgressBar: the platform style resolves
+     * against the SERVICE context's DayNight theme, and on dark-mode MIUI it
+     * drew a hairline that read as "no progress bar at all". Plain views cannot
+     * fail to render. [BarHandle.set] updates the fill width by percent.
+     */
+    private fun loadingBar(): BarHandle {
+        val track = View(ctx).apply {
+            background = card(7, Color.parseColor("#E8EBF2"))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(14))
+                .apply { topMargin = dp(6) }
+        }
+        val fill = View(ctx).apply {
+            background = card(7, Color.parseColor("#3A7AFE"))
+            layoutParams = FrameLayout.LayoutParams(0, FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+        val frame = FrameLayout(ctx).apply {
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            clipChildren = true
+            addView(track, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            addView(fill)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(14))
+                .apply { topMargin = dp(6) }
+        }
+        return BarHandle(frame) { pct ->
+            val w = (frame.width - dp(4)).coerceAtLeast(dp(4))
+            fill.layoutParams = FrameLayout.LayoutParams(
+                (w * pct.coerceIn(0, 100) / 100).coerceAtLeast(dp(4)),
+                FrameLayout.LayoutParams.MATCH_PARENT)
+            fill.requestLayout()
+        }
+    }
+
+    /** Minimal percent-settable handle over the hand-rolled bar. */
+    private class BarHandle(val view: View, val set: (Int) -> Unit) {
+        var progress: Int = 12
+            set(v) { field = v.coerceIn(0, 100); set(field) }
     }
 
     // Loading line ticker: appends elapsed seconds to the stage label and creeps
@@ -447,7 +479,7 @@ class OverlayController(private val ctx: Context) {
     private var loadingBase: String? = null
     private var loadingStarted = 0L
     private var loadingView: TextView? = null
-    private var loadingBarRef: android.widget.ProgressBar? = null
+    private var loadingBarRef: BarHandle? = null
     private var loadingCap = 40
     private val tick: Runnable = object : Runnable {
         override fun run() {
@@ -456,12 +488,15 @@ class OverlayController(private val ctx: Context) {
             loadingView?.text = "$b ${el}s"
             val bar = loadingBarRef
             if (bar != null && bar.progress < loadingCap) {
-                bar.progress = (bar.progress + maxOf(1, (loadingCap - bar.progress) / 8))
-                    .coerceAtMost(loadingCap)
+                bar.progress = bar.progress + maxOf(1, (loadingCap - bar.progress) / 8)
             }
             tickHandler.postDelayed(this, 1000)
         }
     }
+
+    /** True while a loading UI (label + bar) is on screen; showIdle defers to it
+     *  so a burst of chat events cannot wipe the progress bar mid-round. */
+    private var busyState = false
 
     /** How many knowledge notes / history lines went into the pending analysis. */
     fun setContextInfo(notes: Int, history: Int) {
@@ -580,6 +615,7 @@ class OverlayController(private val ctx: Context) {
             loadingBarRef = null
             tickHandler.removeCallbacks(tick)
         }
+        busyState = keepTicker
         val c = contentBox ?: return
         c.removeAllViews(); views.forEach { c.addView(it) }
     }
@@ -624,7 +660,7 @@ class OverlayController(private val ctx: Context) {
             // elapsed clock) instead of a frozen "生成中…" line.
             val lb = hint("生成候选中…")
             val bar = loadingBar().apply { progress = 45 }
-            views.add(lb); views.add(bar)
+            views.add(lb); views.add(bar.view)
             loadingView = lb; loadingBase = "生成候选中…"; loadingBarRef = bar; loadingCap = 85
         } else {
             val fill = lastFill ?: {}
