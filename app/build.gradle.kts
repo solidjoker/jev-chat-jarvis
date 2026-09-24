@@ -26,6 +26,15 @@ val apiKeys: Map<String, String> = run {
         .associate { it.groupValues[1] to it.groupValues[2] }
 }
 val privateBuild = apiKeys.isNotEmpty()
+// The baked glm key is a Coding Plan key: it only answers on the Coding Plan
+// host (pay-as-you-go answers 1113 余额不足). Optional glm_base in the toml
+// overrides; absent that, private builds default to the coding endpoint and
+// public builds bake "" (Prefs then presets pay-as-you-go).
+val privateGlmBase: String = when {
+    apiKeys.containsKey("glm_base") -> apiKeys["glm_base"] ?: ""
+    privateBuild -> "https://open.bigmodel.cn/api/coding/paas/v4"
+    else -> ""
+}
 fun bakedKey(v: String?): String =
     (v ?: "").replace("\\", "\\\\").replace("\"", "\\\"").ifEmpty { "" }
 
@@ -51,6 +60,7 @@ android {
         buildConfigField("boolean", "PRIVATE_BUILD", privateBuild.toString())
         buildConfigField("String", "PRIVATE_JUDGE_KEY", "\"${bakedKey(apiKeys["jev"])}\"")
         buildConfigField("String", "PRIVATE_GLM_KEY", "\"${bakedKey(apiKeys["glm"])}\"")
+        buildConfigField("String", "PRIVATE_GLM_BASE", "\"${bakedKey(privateGlmBase)}\"")
     }
 
     buildFeatures {

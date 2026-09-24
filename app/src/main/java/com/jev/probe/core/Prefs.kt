@@ -26,7 +26,28 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
      * throwaway instances behind the settings test buttons and the KB self-check
      * have nothing to carry over, and used to print one migration line per tap.
      */
-    init { if (prefsName == PREFS_MAIN) { migrateIfNeeded(); pinLegacyProviderIfUnset(); unseedBochaDefaultIfUnconfigured() } }
+    init { if (prefsName == PREFS_MAIN) { migrateIfNeeded(); pinLegacyProviderIfUnset(); remapGlmBaseForPrivateBuild(); unseedBochaDefaultIfUnconfigured() } }
+
+    /**
+     * Private build with a baked Coding-Plan GLM base: a stored base still
+     * pointing at the pay-as-you-go host (persisted by an earlier install, or
+     * by 保存全部设置 under a build that preset it) is dropped, so the baked
+     * default — the endpoint the baked key actually works on — takes over.
+     * Runs once, private builds only, and only when the baked base differs;
+     * any other stored base (DeepSeek, DashScope, a custom URL) is a real
+     * choice and stays untouched.
+     */
+    private fun remapGlmBaseForPrivateBuild() {
+        if (!BuildConfig.PRIVATE_BUILD) return
+        if (sp.getBoolean(K_REMAPPED_GLM_BASE, false)) return
+        val e = sp.edit().putBoolean(K_REMAPPED_GLM_BASE, true)
+        val baked = BuildConfig.PRIVATE_GLM_BASE
+        if (baked.isNotBlank() && baked != GLM_BASE_PAYG) {
+            if ((sp.getString(K_REPLY_BASE, null) ?: "") == GLM_BASE_PAYG) e.remove(K_REPLY_BASE)
+            if ((sp.getString(K_VISION_BASE, null) ?: "") == GLM_BASE_PAYG) e.remove(K_VISION_BASE)
+        }
+        e.apply()
+    }
 
     /**
      * v1.2 -> v1.3: the single `openrouter_key` becomes the judge route's key.
@@ -302,6 +323,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_LEGACY_KEY = "openrouter_key"
         private const val K_MIGRATED_V13 = "prefs_migrated_v13"
         private const val K_PINNED_LEGACY_PROVIDER = "prefs_pinned_legacy_provider_v15"
+        private const val K_REMAPPED_GLM_BASE = "prefs_remapped_glm_base_private"
         private const val K_UNSEEDED_BOCHA = "unseeded_bocha_v141"
         private const val K_JUDGE_PROVIDER = "judge_provider"
         private const val K_JUDGE_BASE = "judge_base_url"
@@ -366,8 +388,15 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         // Reply / vision route presets (OpenAI-compatible chat completions).
         // The two flash models take both plain text and image_url parts, so the
         // same pair serves the reply and the vision (OCR) route.
-        // Zhipu GLM: pay-as-you-go endpoint (NOT the /api/coding/paas/v4 plan host).
-        const val GLM_BASE = "https://open.bigmodel.cn/api/paas/v4"
+        // Pay-as-you-go host — NOT the /api/coding/paas/v4 Coding Plan host.
+        const val GLM_BASE_PAYG = "https://open.bigmodel.cn/api/paas/v4"
+        /**
+         * The GLM base this build presets to. Private builds bake the Coding
+         * Plan endpoint (their baked key is a plan key and answers 1113 余额
+         * 不足 on pay-as-you-go); public builds preset [GLM_BASE_PAYG]. An
+         * optional `glm_base = "..."` line in apikey.toml overrides.
+         */
+        val GLM_BASE: String get() = BuildConfig.PRIVATE_GLM_BASE.ifBlank { GLM_BASE_PAYG }
         const val GLM_MODEL = "glm-5.3-flash"
         const val DEEPSEEK_BASE = "https://api.deepseek.com/v1"
         const val DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -376,12 +405,13 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         const val DASHSCOPE_MODEL = "qwen-plus"
         const val DASHSCOPE_VISION_MODEL = "qwen-vl-max"
 
-        // Blank-fallback defaults: GLM, the first pill. OpenRouter stays
-        // reachable through the 自定义 pill by pasting its /v1 base.
-        const val DEFAULT_REPLY_BASE = GLM_BASE
-        const val DEFAULT_REPLY_MODEL = GLM_MODEL
-        const val DEFAULT_VISION_BASE = GLM_BASE
-        const val DEFAULT_VISION_MODEL = GLM_MODEL
+        // Blank-fallback defaults follow the preset of THIS build (GLM first;
+        // its host is [GLM_BASE]). OpenRouter stays reachable through the
+        // 自定义 pill by pasting its /v1 base.
+        val DEFAULT_REPLY_BASE: String get() = GLM_BASE
+        val DEFAULT_REPLY_MODEL = GLM_MODEL
+        val DEFAULT_VISION_BASE: String get() = GLM_BASE
+        val DEFAULT_VISION_MODEL = GLM_MODEL
 
         const val DEFAULT_REL = "对方是我的伴侣；from=me 的是我发的，from=other 的是对方发的"
     }
