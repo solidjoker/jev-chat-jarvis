@@ -78,6 +78,11 @@ class ReplyClient(private val prefs: Prefs) {
             .put("model", prefs.replyModel)
             .put("messages", messages)
             .put("temperature", temperature)
+        // GLM models "think" by default, which multiplies latency several-fold;
+        // a reply drafter gains nothing from it. Only bigmodel hosts get the
+        // field — other providers may reject an unknown body.
+        if (prefs.replyBaseUrl.contains("bigmodel.cn", ignoreCase = true))
+            body.put("thinking", JSONObject().put("type", "disabled"))
         val resp = HttpJson.post(url, prefs.effectiveReplyKey(), body, Route.REPLY, HttpJson.headersFor(url))
         return resp.optJSONArray("choices")?.optJSONObject(0)
             ?.optJSONObject("message")?.optString("content") ?: ""

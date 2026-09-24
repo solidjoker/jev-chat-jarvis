@@ -556,6 +556,9 @@ open class ChatCaptureService : AccessibilityService() {
                 is ScreenCapture.Result.Ok -> {
                     ocr.scaleX = res.scaleX; ocr.scaleY = res.scaleY
                     ocr.originX = res.originX; ocr.originY = res.originY
+                    // Visible progress: the bubble relabels for the whole OCR
+                    // pass and is restored when it finishes (or fails).
+                    overlay?.setBubbleLabel("识别中")
                     if (rects.isNotEmpty() && !manual) {
                         // Re-measure inside the callback. The rects handed in were
                         // read before the 120ms overlay-hide wait and the shot
@@ -570,27 +573,33 @@ open class ChatCaptureService : AccessibilityService() {
         }
     }
 
-    /** One OCR pass per bubble rectangle; each rect becomes exactly one message. */
+    /**
+     * One full-frame OCR pass, then each recognized line is mapped into the
+     * bubble rectangle that contains its center (both in screen coordinates —
+     * MlKitOcr already unscales and offsets whole-frame lines). This replaced a
+     * per-bubble pass: a screenful of Feishu bubbles used to run the recognizer
+     * N times serially, which was the "识别异常慢" case; now it runs once. A
+     * line landing in no rectangle is chrome around the bubbles and is dropped.
+     */
     private fun ocrByRects(bmp: Bitmap, rects: List<BubbleRect>, title: String?, pkg: String) {
-        val sx = ocr.scaleX; val sy = ocr.scaleY
-        // Screen -> bitmap: drop the window origin first. A window shot does not
-        // start at (0,0) in split screen or when it excludes the status bar.
-        val ox = ocr.originX; val oy = ocr.originY
-        val out = arrayOfNulls<Msg>(rects.size)
-        var remaining = rects.size
-        rects.forEachIndexed { i, br ->
-            val region = Rect(
-                ((br.rect.left - ox) * sx).toInt(), ((br.rect.top - oy) * sy).toInt(),
-                ((br.rect.right - ox) * sx).toInt(), ((br.rect.bottom - oy) * sy).toInt())
-            ocr.recognize(bmp, region) { lines ->
-                val text = cleanBubbleText(lines.joinToString(" ") { it.text })
-                if (text.isNotEmpty()) out[i] = Msg(br.side, text)
-                remaining--
-                if (remaining == 0) {
-                    runCatching { bmp.recycle() }
-                    finishOcrSnapshot(ChatSnapshot(title, out.filterNotNull()), pkg, manual = false)
+        ocr.recognize(bmp, null) { lines ->
+            runCatching { bmp.recycle() }
+            val byBubble = HashMap<Int, StringBuilder>()
+            lines.sortedBy { it.bounds.top }.forEach { l ->
+                val cx = l.bounds.centerX(); val cy = l.bounds.centerY()
+                rects.forEachIndexed { i, br ->
+                    if (br.rect.contains(cx, cy)) {
+                        byBubble.getOrPut(i) { StringBuilder() }.append(l.text.trim()).append(' ')
+                    }
                 }
             }
+            // rects arrive top→bottom sorted; emit the bubbles in that order.
+            val msgs = ArrayList<Msg>(byBubble.size)
+            byBubble.keys.sorted().forEach { i ->
+                val text = cleanBubbleText(byBubble[i]?.toString().orEmpty())
+                if (text.isNotEmpty()) msgs.add(Msg(rects[i].side, text))
+            }
+            finishOcrSnapshot(ChatSnapshot(title, msgs), pkg, manual = false)
         }
     }
 
@@ -652,6 +661,7 @@ open class ChatCaptureService : AccessibilityService() {
     /** Shared tail of both OCR paths: dedupe, then analyze or park the bubble. */
     private fun finishOcrSnapshot(snapshot: ChatSnapshot, pkg: String, manual: Boolean) {
         ocrBusy = false
+        overlay?.setBubbleLabel(null)
         // Counts only — OCR'd chat text never goes to logcat.
         Log.i(TAG, "ocr[$pkg] msgs=${snapshot.messages.size} manual=$manual")
         if (snapshot.messages.isEmpty()) {

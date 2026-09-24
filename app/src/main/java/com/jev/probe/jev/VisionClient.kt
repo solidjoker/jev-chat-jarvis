@@ -52,6 +52,10 @@ class VisionClient(private val prefs: Prefs) {
             .put("model", prefs.visionModel)
             .put("messages", messages)
             .put("temperature", 0.0)
+        // Same as ReplyClient: GLM's default thinking only adds latency, and a
+        // screenshot reader wants the transcription, not reasoning. bigmodel only.
+        if (prefs.visionBaseUrl.contains("bigmodel.cn", ignoreCase = true))
+            body.put("thinking", JSONObject().put("type", "disabled"))
         val resp = HttpJson.post(url, prefs.effectiveVisionKey(), body, Route.VISION, HttpJson.headersFor(url))
         return resp.optJSONArray("choices")?.optJSONObject(0)
             ?.optJSONObject("message")?.optString("content") ?: ""

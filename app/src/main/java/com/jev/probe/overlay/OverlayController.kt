@@ -358,8 +358,26 @@ class OverlayController(private val ctx: Context) {
         ensureRoot(); bubble?.alpha = 1f
         ctxNotes = 0; ctxHistory = 0   // counts for the round that is starting
         replyError = null              // this round has not failed (yet)
-        setContent(listOf(hint(label)))
+        val v = hint(label)
+        setContent(listOf(v))          // also stops any previous ticker
+        loadingView = v; loadingBase = label; loadingStarted = System.currentTimeMillis()
+        tickHandler.postDelayed(tick, 1000)
         if (!expanded) toggle()
+    }
+
+    // Elapsed-seconds ticker on the loading line: a static "分析中…" that sits
+    // there for 30 slow seconds reads as frozen; "分析中… 12s" reads as alive.
+    private val tickHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var loadingBase: String? = null
+    private var loadingStarted = 0L
+    private var loadingView: TextView? = null
+    private val tick: Runnable = object : Runnable {
+        override fun run() {
+            val b = loadingBase ?: return
+            val el = (System.currentTimeMillis() - loadingStarted) / 1000
+            loadingView?.text = "$b ${el}s"
+            tickHandler.postDelayed(this, 1000)
+        }
     }
 
     /** How many knowledge notes / history lines went into the pending analysis. */
@@ -370,6 +388,14 @@ class OverlayController(private val ctx: Context) {
     /** A caveat line for the panel (OCR mode); null clears it. */
     fun setNote(note: String?) {
         noteText = note
+    }
+
+    /**
+     * Relabel the bubble while a background pass runs (OCR: "识别中") so there
+     * is visible progress even with the panel collapsed; null restores "Jev".
+     */
+    fun setBubbleLabel(s: String?) {
+        bubble?.text = if (s.isNullOrBlank()) "Jev" else s
     }
 
     /**
@@ -458,6 +484,7 @@ class OverlayController(private val ctx: Context) {
 
     fun hide() {
         val r = root ?: return
+        tickHandler.removeCallbacks(tick)
         runCatching { wm.removeView(r) }
         root = null; bubble = null; panel = null; contentBox = null; dangerDot = null; expanded = false
     }
@@ -465,6 +492,8 @@ class OverlayController(private val ctx: Context) {
     // --------------------------------------------------------------- rendering
 
     private fun setContent(views: List<View>) {
+        loadingBase = null              // whatever comes next, loading is over
+        tickHandler.removeCallbacks(tick)
         val c = contentBox ?: return
         c.removeAllViews(); views.forEach { c.addView(it) }
     }
