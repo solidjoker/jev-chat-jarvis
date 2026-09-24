@@ -66,6 +66,9 @@ class SettingsActivity : AppCompatActivity() {
         scroll.addView(root)
 
         root.addView(header("设置"))
+        // Version up top where it is actually seen (it used to sit at the very
+        // bottom of the About card, and nobody scrolled to it).
+        root.addView(text(versionLabel(), 12.5f, sub).apply { setPadding(dp(2), 0, 0, dp(2)) })
 
         // =================== 接口 ===================
         root.addView(section("接口"))

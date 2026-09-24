@@ -298,7 +298,7 @@ open class ChatCaptureService : AccessibilityService() {
      * ranking stands alone on the panel.
      */
     private fun runSandbox(snapshot: ChatSnapshot) {
-        if (analyzing) return
+        if (analyzing) { main.post { overlay?.toast("上一轮还在进行，请稍候") }; return }
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
         main.post { overlay?.showLoading("沙盘推理·起草"); overlay?.setNote(snapshot.note) }
@@ -336,7 +336,7 @@ open class ChatCaptureService : AccessibilityService() {
      * touching the other two buttons.
      */
     private fun runReplies(snapshot: ChatSnapshot) {
-        if (analyzing) return
+        if (analyzing) { main.post { overlay?.toast("上一轮还在进行，请稍候") }; return }
         if (prefs.effectiveReplyKey().isBlank()) {
             main.post { overlay?.showError("回复接口未配密钥（留空则用判断接口密钥）") }; return
         }
@@ -441,7 +441,10 @@ open class ChatCaptureService : AccessibilityService() {
 
     private fun runAnalysis() {
         val snapshot = pendingSnapshot ?: return
-        if (analyzing) return
+        // A re-tap while a round is still in flight used to return SILENTLY —
+        // the user reads that as a dead button. Say so instead; the in-flight
+        // round's own callbacks will still land on the panel.
+        if (analyzing) { main.post { overlay?.toast("上一轮还在进行，请稍候") }; return }
         if (!prefs.hasKey()) { main.post { overlay?.showError("未设置判断接口密钥，去设置里填") }; return }
         analyzing = true
         main.post { overlay?.showLoading("分析中·判断"); overlay?.setNote(snapshot.note) }

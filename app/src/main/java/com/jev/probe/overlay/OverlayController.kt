@@ -426,9 +426,17 @@ class OverlayController(private val ctx: Context) {
 
     private fun loadingBar() = android.widget.ProgressBar(ctx, null,
         android.R.attr.progressBarStyleHorizontal).apply {
-        max = 100; progress = 4
+        max = 100; progress = 12
+        // Explicit tints + a fixed height: the theme-default bar is a hairline
+        // on the white panel (invisible on MIUI at low progress), which read as
+        // "no progress bar at all".
+        progressTintList = android.content.res.ColorStateList.valueOf(
+            Color.parseColor("#3A7AFE"))
+        progressBackgroundTintList = android.content.res.ColorStateList.valueOf(
+            Color.parseColor("#E8EBF2"))
+        minHeight = dp(14); maxHeight = dp(14)
         layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(14))
             .apply { topMargin = dp(6) }
     }
 
