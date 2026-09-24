@@ -42,13 +42,13 @@ open class ChatCaptureService : AccessibilityService() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newFixedThreadPool(2)
 
-    /** Adapted chat apps, keyed by package name.
-     *  WeChat is intentionally NOT wired in: reading it (node tree / screenshot /
-     *  OCR) is what trips WeChat's anti-screenshot risk control, so it is fully
-     *  disabled and handled by a short-circuit notice instead of an adapter (see
-     *  [maybeCapture] / [onAccessibilityEvent]). [WeChatAdapter] is kept in the
-     *  codebase for a possible future restore, just not used here. */
-    private val adapters = listOf(QQAdapter(), XAdapter(), FeishuAdapter()).associateBy { it.pkg }
+    /** Adapted chat apps, keyed by package name. WeChat is gated at runtime by
+     *  [Prefs.wechatEnabled] (checked in [onAccessibilityEvent] / [maybeCapture])
+     *  rather than left out of the map, so flipping the setting takes effect on
+     *  the next event without a service restart. Screenshots are never taken in
+     *  WeChat whatever the setting — see the empty-read branch in [maybeCapture]. */
+    private val adapters = listOf(WeChatAdapter(), QQAdapter(), XAdapter(), FeishuAdapter())
+        .associateBy { it.pkg }
 
     /** Submit to the worker, ignoring rejection after the service is torn down
      *  (a stale overlay callback must never crash the process). */
@@ -87,10 +87,10 @@ open class ChatCaptureService : AccessibilityService() {
      *  See [ocrSignature]: this is the brake on the OCR path. */
     private var lastOcrSignature: String = ""
 
-    /** WeChat is fully disabled — we never read it, so instead of a signature we
-     *  just track whether the "WeChat not supported" notice has been shown for
-     *  the current WeChat visit. Reset to false whenever a non-WeChat foreground
-     *  is seen, so it re-appears next visit but does not re-pop on every event. */
+    /** Whether the "WeChat support off" notice has been shown for the current
+     *  WeChat visit (only relevant when [Prefs.wechatEnabled] is false). Reset
+     *  on any non-WeChat foreground, so it re-appears once per visit without
+     *  re-popping on every event. */
     private var wechatNoticeShown = false
 
     override fun onServiceConnected() {
@@ -118,6 +118,10 @@ open class ChatCaptureService : AccessibilityService() {
         }
         // Bubble menu: one manual screenshot + OCR, for any app at all.
         overlay?.onOcrCapture = { ocrCaptureManual() }
+        // WeChat's notification channel feeds the same pipeline (v1.5): incoming
+        // messages analyzed wherever the user is. Unwired in onDestroy so a
+        // stale service instance can never receive captures.
+        WeChatNotifyStore.onNewMessage = { t, x -> onWeChatNotification(t, x) }
         // Keep the process at foreground importance so MIUI does not freeze us.
         runCatching { KeepAliveService.start(this) }
         // Load the bundled OCR model now, off the main thread: the first
@@ -149,10 +153,12 @@ open class ChatCaptureService : AccessibilityService() {
         // our own settings screens, the launcher, and the system UI.
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val fg = rootInActiveWindow?.packageName?.toString()
-            // WeChat is fully disabled: never read/screenshot/OCR/fill here, only
-            // show the one-time "not supported" notice and stop. Checked before the
-            // generic no-adapter branch because WeChat is no longer in `adapters`.
-            if (fg == PKG_WECHAT) { foregroundPkg = fg; showWeChatDisabled(auto = true); return }
+            // WeChat support off (v1.4 behavior): never read it, only the
+            // one-time "not supported" notice. Checked before the generic
+            // no-adapter branch because WeChat is always in `adapters`.
+            if (fg == PKG_WECHAT && !prefs.wechatEnabled) {
+                foregroundPkg = fg; showWeChatDisabled(auto = true); return
+            }
             if (fg != null && fg !in adapters) {
                 foregroundPkg = fg
                 wechatNoticeShown = false // left WeChat → allow the notice again next visit
@@ -175,10 +181,9 @@ open class ChatCaptureService : AccessibilityService() {
     private fun maybeCapture() {
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString()
-        // WeChat is fully disabled — no tree read, no screenshot, no OCR, no fill.
-        // A content-changed / scrolled event in WeChat only re-shows the one-time
-        // notice (deduped); it must never reach an adapter or the OCR path.
-        if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = true); return }
+        // WeChat support off (v1.4 behavior): no tree read, no screenshot, no
+        // fill — only the deduped notice. It must never reach an adapter.
+        if (pkg == PKG_WECHAT && !prefs.wechatEnabled) { showWeChatDisabled(auto = true); return }
         wechatNoticeShown = false // any other foreground → allow the notice again next WeChat visit
         // Apps with no adapter are never handled automatically (v1.3 revision):
         // the only way in for them is the bubble menu's "截屏识别一次".
@@ -203,6 +208,17 @@ open class ChatCaptureService : AccessibilityService() {
             // still has something to tap when OCR is off, deduped, or comes back
             // empty — previously all three cases left the screen with no bubble.
             if (overlay?.isShowing() != true) main.post { overlay?.showIdle(snapshot.title) }
+            // WeChat NEVER goes down the screenshot path: its chat screens are
+            // FLAG_SECURE for many accounts (the shot comes back empty/blocked)
+            // and screenshots are exactly what its risk control watches. What is
+            // left is the notification buffer — if it holds this conversation,
+            // wire it in so a bubble tap analyzes it; otherwise say why not.
+            if (pkg == PKG_WECHAT) {
+                val byNotif = WeChatNotifyStore.snapshotFor(snapshot.title)
+                if (byNotif != null) currentSnapshot = byNotif
+                main.post { overlay?.setNote(byNotif?.note ?: WECHAT_NO_READ_NOTE) }
+                return
+            }
             if (prefs.ocrFallback) {
                 // Gate BEFORE the shot, not after the OCR. Feishu's tree is empty
                 // on every content-changed event, and a successful shot resets the
@@ -251,13 +267,36 @@ open class ChatCaptureService : AccessibilityService() {
     }
 
     /**
-     * Foreground is WeChat, which is fully disabled: no node-tree read, no
-     * screenshot, no OCR, no fill. We only surface a one-time notice saying WeChat
-     * itself blocks reading. [auto] events (accessibility callbacks)
-     * show it once per WeChat visit — [wechatNoticeShown] dedupes them; a manual
-     * bubble tap ([auto] = false) always shows it. Never gated by the user's
-     * whitelist (it is an info notice, not a read) and only ever reached under
-     * the WeChat package.
+     * A new WeChat message arrived via notification (fired from
+     * [WeChatNotifyStore] on the main thread). Analyzes it wherever the user
+     * happens to be — that is the whole point of this channel: WeChat's tree
+     * may be unreadable and its screen unshootable, but the message still got
+     * analyzed before the user even opens WeChat. Runs the same dedupe /
+     * conversation-reset hygiene as the tree path.
+     */
+    private fun onWeChatNotification(title: String, text: String) {
+        if (!prefs.enabled || !prefs.wechatEnabled) return
+        val snap = WeChatNotifyStore.snapshotFor(title) ?: return
+        if (!prefs.isAllowed(snap.title)) return
+        if (PKG_WECHAT != activePkg) { activePkg = PKG_WECHAT; lastSignature = "" }
+        val sig = snap.signature()
+        if (sig == lastSignature && overlay?.isShowing() == true) return
+        main.post { overlay?.resetForNewConversation() }
+        lastSignature = sig
+        currentSnapshot = snap
+        if (!prefs.autoAnalyze) { main.post { overlay?.showIdle(snap.title) }; return }
+        pendingSnapshot = snap
+        main.removeCallbacks(debounce)
+        main.postDelayed(debounce, 800)   // burst of reposts → one analysis
+    }
+
+    /**
+     * Foreground is WeChat AND support is switched off in settings: no node-tree
+     * read, no screenshot, no OCR, no fill. We only surface a one-time notice.
+     * [auto] events (accessibility callbacks) show it once per WeChat visit —
+     * [wechatNoticeShown] dedupes them; a manual bubble tap ([auto] = false)
+     * always shows it. Never gated by the user's whitelist (it is an info
+     * notice, not a read) and only ever reached under the WeChat package.
      */
     private fun showWeChatDisabled(auto: Boolean) {
         if (auto && wechatNoticeShown) return
@@ -343,9 +382,25 @@ open class ChatCaptureService : AccessibilityService() {
     private fun ocrCaptureManual() {
         val root = rootInActiveWindow
         val pkg = root?.packageName?.toString() ?: foregroundPkg ?: activePkg ?: ""
-        // WeChat is fully disabled: a manual "截屏识别一次" in WeChat must NOT take
-        // a screenshot — just show the notice (a manual tap always shows it).
-        if (pkg == PKG_WECHAT) { showWeChatDisabled(auto = false); return }
+        // WeChat never gets screenshotted. With support on, a manual tap
+        // analyzes what the tree read gives (bubbles with text), else whatever
+        // the notification buffer holds; with support off, the notice.
+        if (pkg == PKG_WECHAT) {
+            if (!prefs.wechatEnabled) { showWeChatDisabled(auto = false); return }
+            // Tree read first: with text it wins; empty it may still carry the
+            // conversation title, which then scopes the notification lookup.
+            val treeSnap = root?.let { adapters[PKG_WECHAT]?.extract(it, resources) }
+            val snap = treeSnap?.takeIf { it.messages.isNotEmpty() }
+                ?: WeChatNotifyStore.snapshotFor(treeSnap?.title)
+            if (snap == null) {
+                overlay?.toast("微信没读到正文；开启通知使用权后，对方新消息会自动分析")
+                return
+            }
+            currentSnapshot = snap
+            pendingSnapshot = snap
+            runAnalysis()
+            return
+        }
         // Top bar text, if this app has one we can read; else the first OCR line.
         val title = root?.let {
             findTitleInActionBar(it, Int.MAX_VALUE, resources.displayMetrics.widthPixels, resources, 0.15, 0.85)
@@ -614,6 +669,7 @@ open class ChatCaptureService : AccessibilityService() {
         overlay?.onManualAnalyze = null
         overlay?.onSaveContact = null
         overlay?.onOcrCapture = null
+        WeChatNotifyStore.onNewMessage = null
         overlay?.hide()
         overlay = null
         worker.shutdownNow()
@@ -622,15 +678,19 @@ open class ChatCaptureService : AccessibilityService() {
     companion object {
         private const val TAG = "JEVASSIST"
 
-        /** WeChat's package. Reading it (node tree / screenshot / OCR) is what
-         *  trips WeChat's anti-screenshot risk control, so it is fully disabled:
-         *  no adapter, no capture, only a one-time "not supported" notice. */
+        /** WeChat's package. Support is gated by [Prefs.wechatEnabled]; the one
+         *  thing never done in WeChat, whatever the setting, is take a
+         *  screenshot (FLAG_SECURE + risk control). See [maybeCapture]. */
         private const val PKG_WECHAT = "com.tencent.mm"
 
-        /** Shown once when the foreground is WeChat. Plain words, full-width
-         *  punctuation; steers the user to a still-supported app. */
+        /** Shown once when the foreground is WeChat and support is OFF. */
         private const val WECHAT_DISABLED_MSG =
-            "微信已限制读取，请在别的软件上使用"
+            "微信支持已关闭，可在设置里开启（实验）"
+
+        /** Shown on the parked bubble when WeChat's tree is unreadable AND the
+         *  notification buffer has nothing for this conversation. */
+        private const val WECHAT_NO_READ_NOTE =
+            "微信正文没读到（截屏已禁用）；开启通知使用权后对方新消息会自动分析"
 
         /** Whole-screen OCR keeps the middle: no action bar, no input area. */
         private const val TOP_CROP = 0.12f

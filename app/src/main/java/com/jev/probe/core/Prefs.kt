@@ -2,6 +2,7 @@ package com.jev.probe.core
 
 import android.content.Context
 import android.util.Log
+import com.jev.probe.BuildConfig
 
 /**
  * App-private config store. Holds the three API routes (judge / reply / vision),
@@ -10,6 +11,11 @@ import android.util.Log
  *
  * Key handling: stored in app-private SharedPreferences (not world-readable,
  * never logged, never in code/git). Only key *lengths* are ever logged.
+ *
+ * Private build exception: when the (gitignored) apikey.toml was present at
+ * build time, a blank stored key falls back to the value baked into
+ * [BuildConfig] — the private APK then works with nothing typed in. Public
+ * builds bake empty strings, so the fallback is a no-op there.
  */
 class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
@@ -20,7 +26,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
      * throwaway instances behind the settings test buttons and the KB self-check
      * have nothing to carry over, and used to print one migration line per tap.
      */
-    init { if (prefsName == PREFS_MAIN) { migrateIfNeeded(); unseedBochaDefaultIfUnconfigured() } }
+    init { if (prefsName == PREFS_MAIN) { migrateIfNeeded(); pinLegacyProviderIfUnset(); unseedBochaDefaultIfUnconfigured() } }
 
     /**
      * v1.2 -> v1.3: the single `openrouter_key` becomes the judge route's key.
@@ -41,20 +47,33 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     }
 
     /**
-     * Fresh install only: default the judge route to Bocha Jev (limited-time free).
-     * Runs ONLY when there is no judge config whatsoever — the provider key was
-     * never written AND both the current judge key and the legacy OpenRouter key
-     * are blank. Any existing or migrated user is left completely untouched, so an
-     * OpenRouter key can never be redirected to jev.bocha.cn. The [judgeProvider]
-     * getter default stays OpenRouter on purpose; this only seeds a truly new sp.
+     * v1.5 flips the judge getter defaults from OpenRouter to TypeSafe. An
+     * upgrader holding a key but no persisted provider (migrateIfNeeded writes
+     * only the key; only the settings Save button pins the provider) resolved
+     * to OpenRouter under the old defaults — their key works there and not on
+     * TypeSafe. Pin exactly once: key present + provider never written means
+     * they were configured under the OpenRouter default, so keep them on it;
+     * only truly fresh installs fall through to TypeSafe.
      */
+    private fun pinLegacyProviderIfUnset() {
+        if (sp.getBoolean(K_PINNED_LEGACY_PROVIDER, false)) return
+        val e = sp.edit().putBoolean(K_PINNED_LEGACY_PROVIDER, true)
+        val hasKey = !(sp.getString(K_JUDGE_KEY, "") ?: "").isBlank()
+        if (hasKey && sp.getString(K_JUDGE_PROVIDER, null) == null) {
+            e.putString(K_JUDGE_PROVIDER, PROVIDER_OPENROUTER)
+                .putString(K_JUDGE_BASE, DEFAULT_JUDGE_BASE_OPENROUTER)
+                .putString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_OPENROUTER)
+            Log.i(TAG, "prefs: pinned legacy judge config to openrouter preset")
+        }
+        e.apply()
+    }
+
     /**
-     * v1.4.0 seeded fresh installs to Bocha Jev; v1.4.1 restores OpenRouter as the
-     * default (Bocha stays available, now second in the list). Undo that earlier
-     * auto-seed exactly once, and only when the user never entered a key and never
-     * picked a provider by hand — a saved key, or any non-Bocha provider, means a
-     * real choice we must not touch. Fresh installs now get no seed at all: the
-     * getters already default to OpenRouter.
+     * Historical: v1.4.0 seeded fresh installs to Bocha Jev; v1.4.1 removed
+     * that seed. Undo it exactly once, and only when the user never entered a
+     * key and never picked a provider by hand — a saved key, or any non-Bocha
+     * provider, means a real choice we must not touch. Since v1.5 the cleared
+     * fields fall through to the TypeSafe-direct defaults.
      */
     private fun unseedBochaDefaultIfUnconfigured() {
         if (sp.getBoolean(K_UNSEEDED_BOCHA, false)) return
@@ -63,29 +82,30 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         val key = sp.getString(K_JUDGE_KEY, "") ?: ""
         if (prov == PROVIDER_BOCHA && key.isBlank()) {
             e.remove(K_JUDGE_PROVIDER).remove(K_JUDGE_BASE).remove(K_JUDGE_MODEL)
-            Log.i(TAG, "prefs: reverted auto-seeded bocha default to openrouter")
+            Log.i(TAG, "prefs: cleared auto-seeded bocha default")
         }
         e.apply()
     }
 
     // ---------------------------------------------------------------- judge
 
-    /** "bocha" | "openrouter" | "typesafe" | "vercel" | "custom". */
+    /** "bocha" | "openrouter" | "typesafe" | "vercel" | "custom". Default typesafe. */
     var judgeProvider: String
-        get() = sp.getString(K_JUDGE_PROVIDER, PROVIDER_OPENROUTER) ?: PROVIDER_OPENROUTER
+        get() = sp.getString(K_JUDGE_PROVIDER, PROVIDER_TYPESAFE) ?: PROVIDER_TYPESAFE
         set(v) = sp.edit().putString(K_JUDGE_PROVIDER, v.trim()).apply()
 
     /** Host root; the path is appended per provider (see [judgeEndpoint]). */
     var judgeBaseUrl: String
-        get() = sp.getString(K_JUDGE_BASE, DEFAULT_JUDGE_BASE_OPENROUTER) ?: DEFAULT_JUDGE_BASE_OPENROUTER
+        get() = sp.getString(K_JUDGE_BASE, DEFAULT_JUDGE_BASE_TYPESAFE) ?: DEFAULT_JUDGE_BASE_TYPESAFE
         set(v) = sp.edit().putString(K_JUDGE_BASE, v.trim()).apply()
 
+    /** Blank stored key = the private build's baked judge key ("" when public). */
     var judgeKey: String
-        get() = sp.getString(K_JUDGE_KEY, "") ?: ""
+        get() = (sp.getString(K_JUDGE_KEY, "") ?: "").ifBlank { BuildConfig.PRIVATE_JUDGE_KEY }
         set(v) = sp.edit().putString(K_JUDGE_KEY, v.trim()).apply()
 
     var judgeModel: String
-        get() = sp.getString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_OPENROUTER) ?: DEFAULT_JUDGE_MODEL_OPENROUTER
+        get() = sp.getString(K_JUDGE_MODEL, DEFAULT_JUDGE_MODEL_TYPESAFE) ?: DEFAULT_JUDGE_MODEL_TYPESAFE
         set(v) = sp.edit().putString(K_JUDGE_MODEL, v.trim()).apply()
 
     /** Back-compat alias so older call sites keep compiling. */
@@ -95,14 +115,18 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
     // ---------------------------------------------------------------- reply
 
-    /** OpenAI-compatible base, up to and including `/v1`. */
+    /**
+     * OpenAI-compatible base, up to and including `/v1`. A complete
+     * `/chat/completions` URL is also accepted and POSTed verbatim (see
+     * [appendChatCompletions]).
+     */
     var replyBaseUrl: String
         get() = sp.getString(K_REPLY_BASE, DEFAULT_REPLY_BASE) ?: DEFAULT_REPLY_BASE
         set(v) = sp.edit().putString(K_REPLY_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [judgeKey]. */
+    /** Blank stored key = the private build's baked GLM key; then [judgeKey]. */
     var replyKey: String
-        get() = sp.getString(K_REPLY_KEY, "") ?: ""
+        get() = (sp.getString(K_REPLY_KEY, "") ?: "").ifBlank { BuildConfig.PRIVATE_GLM_KEY }
         set(v) = sp.edit().putString(K_REPLY_KEY, v.trim()).apply()
 
     /** Generative model for drafting the 3 candidate replies. */
@@ -113,17 +137,17 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     // --------------------------------------------------------------- vision
 
     /**
-     * Blank = the OpenRouter vision default. Deliberately does NOT follow
-     * [replyBaseUrl]: a reply host like DeepSeek has no vision endpoint, so
-     * inheriting it would silently break OCR.
+     * Blank = the GLM vision default. Deliberately does NOT follow
+     * [replyBaseUrl]: the vision route may need a different host than the
+     * reply one, so it keeps its own address box.
      */
     var visionBaseUrl: String
         get() = sp.getString(K_VISION_BASE, DEFAULT_VISION_BASE) ?: DEFAULT_VISION_BASE
         set(v) = sp.edit().putString(K_VISION_BASE, v.trim()).apply()
 
-    /** Blank = fall back to [replyKey] then [judgeKey]. */
+    /** Blank stored key = the private build's baked GLM key; then the reply chain. */
     var visionKey: String
-        get() = sp.getString(K_VISION_KEY, "") ?: ""
+        get() = (sp.getString(K_VISION_KEY, "") ?: "").ifBlank { BuildConfig.PRIVATE_GLM_KEY }
         set(v) = sp.edit().putString(K_VISION_KEY, v.trim()).apply()
 
     var visionModel: String
@@ -152,6 +176,18 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         set(v) = sp.edit().putBoolean(K_AUTO_SUMMARY, v).apply()
 
     // ------------------------------------------------------------ OCR (B)
+
+    /**
+     * WeChat support (v1.5, experimental). ON: read WeChat chat bubbles via the
+     * accessibility tree (disguised service) plus incoming messages via
+     * notification access. Screenshots/OCR are NEVER taken in WeChat either
+     * way — its chat screens are FLAG_SECURE for many accounts and screenshots
+     * are what its risk control watches. OFF restores the v1.4 "not supported"
+     * short-circuit.
+     */
+    var wechatEnabled: Boolean
+        get() = sp.getBoolean(K_WECHAT_ENABLED, true)
+        set(v) = sp.edit().putBoolean(K_WECHAT_ENABLED, v).apply()
 
     /** "mlkit" | "vision". */
     var ocrEngine: String
@@ -234,13 +270,18 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
     }
 
     /** Full POST URL for the OpenAI-compatible chat completions call. */
-    fun replyEndpoint(): String = "${replyBaseUrl.trim().trimEnd('/')}/chat/completions"
+    fun replyEndpoint(): String = chatCompletionsUrl(replyBaseUrl, DEFAULT_REPLY_BASE)
 
-    /** Same shape as [replyEndpoint]; blank falls back to the OpenRouter default. */
-    fun visionEndpoint(): String {
-        val base = visionBaseUrl.trim().ifBlank { DEFAULT_VISION_BASE }
-        return "${base.trimEnd('/')}/chat/completions"
-    }
+    /** Same shape as [replyEndpoint]; blank falls back to the GLM default. */
+    fun visionEndpoint(): String = chatCompletionsUrl(visionBaseUrl, DEFAULT_VISION_BASE)
+
+    /**
+     * Base -> endpoint, with the blank fallback applied. The append rule itself
+     * lives in [appendChatCompletions] so the settings-page preview cannot
+     * diverge from what actually gets POSTed.
+     */
+    private fun chatCompletionsUrl(base: String, fallback: String): String =
+        appendChatCompletions(base.ifBlank { fallback })
 
     fun isAllowed(title: String?): Boolean {
         val wl = whitelist
@@ -260,6 +301,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
 
         private const val K_LEGACY_KEY = "openrouter_key"
         private const val K_MIGRATED_V13 = "prefs_migrated_v13"
+        private const val K_PINNED_LEGACY_PROVIDER = "prefs_pinned_legacy_provider_v15"
         private const val K_UNSEEDED_BOCHA = "unseeded_bocha_v141"
         private const val K_JUDGE_PROVIDER = "judge_provider"
         private const val K_JUDGE_BASE = "judge_base_url"
@@ -275,6 +317,7 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         private const val K_CTX_COUNT = "context_history_count"
         private const val K_AUTO_SUMMARY = "auto_summary"
         private const val K_OCR_ENGINE = "ocr_engine"
+        private const val K_WECHAT_ENABLED = "wechat_enabled"
         private const val K_OCR_UNKNOWN = "ocr_unknown_apps"
         private const val K_OCR_FALLBACK = "ocr_fallback"
         private const val K_OCR_AUTO = "ocr_auto_analyze"
@@ -295,12 +338,24 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         const val OCR_MLKIT = "mlkit"
         const val OCR_VISION = "vision"
 
+        /**
+         * The one base->endpoint rule for OpenAI-compatible routes: append
+         * `/chat/completions` unless the URL already ends in it. Case-insensitive
+         * so a hand-typed `HTTP://…/Chat/Completions` is not doubled. Public
+         * because the settings page previews exactly what this computes.
+         */
+        fun appendChatCompletions(url: String): String {
+            val b = url.trim().trimEnd('/')
+            return if (b.lowercase().endsWith("/chat/completions")) b else "$b/chat/completions"
+        }
+
         // Judge route presets.
         // Bocha Jev: same protocol/path as TypeSafe (/v1/systemone). Limited-time free.
         const val DEFAULT_JUDGE_BASE_BOCHA = "https://jev.bocha.cn"
         const val DEFAULT_JUDGE_MODEL_BOCHA = "bocha-jev-v1"
         const val DEFAULT_JUDGE_BASE_OPENROUTER = "https://openrouter.ai/api"
         const val DEFAULT_JUDGE_MODEL_OPENROUTER = "typesafe/jev-1.13"
+        // TypeSafe direct is the judge route's default: the Jev model's own host.
         const val DEFAULT_JUDGE_BASE_TYPESAFE = "https://api.typesafe.ai"
         const val DEFAULT_JUDGE_MODEL_TYPESAFE = "jev-latest"
         // Vercel AI Gateway's TypeSafe-compatible API. Same /v1/systemone body
@@ -308,18 +363,25 @@ class Prefs(context: Context, prefsName: String = PREFS_MAIN) {
         const val DEFAULT_JUDGE_BASE_VERCEL = "https://ai-gateway.vercel.sh/typesafe"
         const val DEFAULT_JUDGE_MODEL_VERCEL = "typesafe-ai/jev"
 
-        // Reply route presets (OpenAI-compatible chat completions).
-        const val DEFAULT_REPLY_BASE = "https://openrouter.ai/api/v1"
-        const val DEFAULT_REPLY_MODEL = "deepseek/deepseek-chat-v3.1"
+        // Reply / vision route presets (OpenAI-compatible chat completions).
+        // The two flash models take both plain text and image_url parts, so the
+        // same pair serves the reply and the vision (OCR) route.
+        // Zhipu GLM: pay-as-you-go endpoint (NOT the /api/coding/paas/v4 plan host).
+        const val GLM_BASE = "https://open.bigmodel.cn/api/paas/v4"
+        const val GLM_MODEL = "glm-5.3-flash"
         const val DEEPSEEK_BASE = "https://api.deepseek.com/v1"
-        const val DEEPSEEK_MODEL = "deepseek-chat"
+        const val DEEPSEEK_MODEL = "deepseek-v4-flash"
+        const val DEEPSEEK_VISION_MODEL = "deepseek-v4-flash"
         const val DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         const val DASHSCOPE_MODEL = "qwen-plus"
-
-        // Vision route preset (OpenRouter region-available; user may change).
-        const val DEFAULT_VISION_BASE = "https://openrouter.ai/api/v1"
-        const val DEFAULT_VISION_MODEL = "qwen/qwen2.5-vl-72b-instruct"
         const val DASHSCOPE_VISION_MODEL = "qwen-vl-max"
+
+        // Blank-fallback defaults: GLM, the first pill. OpenRouter stays
+        // reachable through the 自定义 pill by pasting its /v1 base.
+        const val DEFAULT_REPLY_BASE = GLM_BASE
+        const val DEFAULT_REPLY_MODEL = GLM_MODEL
+        const val DEFAULT_VISION_BASE = GLM_BASE
+        const val DEFAULT_VISION_MODEL = GLM_MODEL
 
         const val DEFAULT_REL = "对方是我的伴侣；from=me 的是我发的，from=other 的是对方发的"
     }

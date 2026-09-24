@@ -14,6 +14,21 @@ val releaseProps = Properties().apply {
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
 
+// Private build: when <repoRoot>/apikey.toml exists (gitignored — NEVER commit
+// it), its keys are baked into BuildConfig and the version gets a "-private"
+// suffix, so the APK works out of the box with no keys typed into settings.
+// Without the file the output is byte-for-byte the public build's config:
+// empty strings, no suffix. Only simple `key = "value"` lines are read.
+val apiKeys: Map<String, String> = run {
+    val f = rootProject.file("apikey.toml")
+    if (!f.exists()) emptyMap() else f.readText(Charsets.UTF_8).lineSequence()
+        .mapNotNull { Regex("""^\s*(\w+)\s*=\s*"([^"]*)"\s*$""").find(it) }
+        .associate { it.groupValues[1] to it.groupValues[2] }
+}
+val privateBuild = apiKeys.isNotEmpty()
+fun bakedKey(v: String?): String =
+    (v ?: "").replace("\\", "\\\\").replace("\"", "\\\"").ifEmpty { "" }
+
 android {
     namespace = "com.jev.probe"
     compileSdk = 35
@@ -22,8 +37,9 @@ android {
         applicationId = "com.jev.probe"
         minSdk = 30
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
+        if (privateBuild) versionNameSuffix = "-private"
 
         // ML Kit's bundled Chinese recognizer ships native libs for every ABI.
         // The target phone (and every phone this can run on: minSdk 30) is
@@ -31,6 +47,14 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+
+        buildConfigField("boolean", "PRIVATE_BUILD", privateBuild.toString())
+        buildConfigField("String", "PRIVATE_JUDGE_KEY", "\"${bakedKey(apiKeys["jev"])}\"")
+        buildConfigField("String", "PRIVATE_GLM_KEY", "\"${bakedKey(apiKeys["glm"])}\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {

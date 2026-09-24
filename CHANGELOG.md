@@ -2,10 +2,28 @@
 
 格式：每版按 新增 / 改进 / 修复 / 已知限制 / 下载 归类，人话版，不是提交列表。
 
-## 未发布
+## v1.5 — 2026-09-24
 
 **新增**
-- 判断接口新增「Vercel」预设。选中后自动填好地址 `https://ai-gateway.vercel.sh/typesafe` 和模型 `typesafe-ai/jev`，密钥用 Vercel AI Gateway 的 key。走的是网关的 TypeSafe 兼容接口 `POST /v1/systemone`，和 TypeSafe 直连同一套请求体与 `noul` 答案，默认仍是 OpenRouter。
+- **微信实验性回归**：微信正文对无障碍隐藏、屏幕又开了防截屏，两条老路都断；v1.5 改走两条不截屏的路——优先读聊天气泡节点（伪装服务），读不到时通过「通知使用权」读系统通知里的对方新消息，消息到了不管你在哪个界面都会自动分析。微信内**绝不截屏**（防截屏拦得住，且有风控风险）；填入失败自动退回复制到剪贴板。设置里有开关（默认开）和通知使用权入口。通知通道只能看到对方发来的新消息，看不到历史和自己发的，面板会注明。
+- 判断接口新增「Vercel」预设。选中后自动填好地址 `https://ai-gateway.vercel.sh/typesafe` 和模型 `typesafe-ai/jev`，密钥用 Vercel AI Gateway 的 key。走的是网关的 TypeSafe 兼容接口 `POST /v1/systemone`，和 TypeSafe 直连同一套请求体与 `noul` 答案。
+- 判断接口的连通测试拆成两个按钮：「测试意图判断」跑 7 项判断题；「测试沙盘推理」用内置示例回复验证候选排序，不依赖回复接口是否配置。
+
+**变更**
+- 判断接口默认改为 TypeSafe 直连（`https://api.typesafe.ai`，模型 `jev-latest`，即官方 quickstart 的配置），仅全新安装生效；已保存过判断配置的老用户不受影响，已有密钥但从未手动选过服务商的老用户会自动保持在 OpenRouter 预设，不会被静默切走。
+- 回复 / 视觉接口预设改为：智谱 GLM（`glm-5.3-flash`，默认）/ DeepSeek 官方（`deepseek-v4-flash`）/ 通义兼容 / 自定义。OpenRouter 不再是内置档，仍可通过「自定义」粘贴其 `/v1` 地址使用。留空时默认 GLM。
+- 移除了「DeepSeek 不支持视觉」的硬拦截：两个 flash 预设都同时作为回复和视觉（OCR）的候选项。
+
+**改进**
+- 回复、视觉接口支持直接粘贴完整的 `/chat/completions` 地址：带完整路径的地址按原样请求，不会再被重复拼接；点「自定义」会把框里的预设地址展开成完整请求地址，所见即所发。
+- 支持明文 `http://` 的自定义地址：局域网 / 本机模型服务（如 Ollama `http://192.168.x.x:11434/v1`、LM Studio）可以直接填用，之前会被 Android 明文流量限制拦下。请求仍然只发往你自己填的地址；测试明文地址时结果区会提示「仅建议局域网自建服务」。
+- 判断接口「自定义」档连通测试会校验地址带路径：只填裸域名（如 `https://example.com`）会明确提示，不再误 POST 到根路径。
+
+**已知限制**
+- 判断接口需要自己配置 API Key；TypeSafe 的 key 在 [docs.typesafe.ai](https://docs.typesafe.ai/introduction/quickstart) 申请。
+- 微信通知通道：只覆盖对方发来的新消息，且正在微信里打开的那个会话不会有通知；群聊通知正文自带发言人前缀。小米 / HyperOS 可能把通知使用权杀掉，重启后需要看一眼设置里开关还在不在。
+
+**下载**：[jev-assistant-v1.5-release.apk](https://github.com/jev-chat/jev-chat-jarvis/raw/v1.5/apk/jev-assistant-v1.5-release.apk)
 
 ## v1.4 — 2026-09-23
 

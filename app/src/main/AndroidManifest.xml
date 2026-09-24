@@ -7,8 +7,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- usesCleartextTraffic is deliberate: custom endpoints may be LAN/local
+         model servers (e.g. Ollama at http://192.168.x.x:11434). Requests go
+         only to URLs the user typed into settings. Do not remove silently. -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -50,6 +54,19 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep the accessibility reader alive on aggressive OEM power management" />
+        </service>
+
+        <!-- WeChat's notification channel (v1.5): WeChat hides its accessibility
+             tree and FLAG_SECUREs its screens, so incoming messages are read from
+             the system notifications instead — no screenshot, no WeChat-internal
+             state. Only fires with the user's notification-access grant. -->
+        <service
+            android:name=".capture.WeChatNotificationListener"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
     </application>
 

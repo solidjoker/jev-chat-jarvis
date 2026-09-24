@@ -24,6 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import com.jev.probe.core.ChatSnapshot
 import com.jev.probe.core.Msg
 import com.jev.probe.core.Prefs
+import com.jev.probe.core.RankedReply
 import com.jev.probe.core.kb.KbSelfCheck
 import com.jev.probe.core.kb.KbStore
 import com.jev.probe.jev.JudgeClient
@@ -74,15 +75,15 @@ class SettingsActivity : AppCompatActivity() {
         judgeCard.addView(cardTitle("判断接口（Jev）"))
         judgeCard.addView(text("读对方消息、给意图判断和候选排序。必须配置。", 12f, sub))
 
-        val judgeBaseEdit = edit(prefs.judgeBaseUrl, Prefs.DEFAULT_JUDGE_BASE_OPENROUTER)
-        val judgeModelEdit = edit(prefs.judgeModel, Prefs.DEFAULT_JUDGE_MODEL_OPENROUTER)
+        judgeBaseEdit = edit(prefs.judgeBaseUrl, Prefs.DEFAULT_JUDGE_BASE_TYPESAFE)
+        judgeModelEdit = edit(prefs.judgeModel, Prefs.DEFAULT_JUDGE_MODEL_TYPESAFE)
         judgeProviderIdx = when (prefs.judgeProvider) {
             Prefs.PROVIDER_OPENROUTER -> 0
             Prefs.PROVIDER_BOCHA -> 1
             Prefs.PROVIDER_TYPESAFE -> 2
             Prefs.PROVIDER_VERCEL -> 3
             Prefs.PROVIDER_CUSTOM -> 4
-            else -> 0
+            else -> 2   // unknown value falls back to the default provider
         }
         // Bocha promo block — official address + one-tap copy (limited-time free).
         // Shown ONLY when Bocha Jev is the selected provider; picking any other
@@ -150,29 +151,9 @@ class SettingsActivity : AppCompatActivity() {
         judgeCard.addView(label("模型"))
         judgeCard.addView(judgeModelEdit)
         val judgeResult = resultText()
-        judgeCard.addView(cardBtn("测试判断") {
-            val base = judgeBaseEdit.text.toString().trim()
-            val key = judgeKeyEdit.text.toString().trim()
-            val model = judgeModelEdit.text.toString().trim()
-            if (key.isBlank()) { judgeResult.text = "请先填密钥"; return@cardBtn }
-            judgeResult.text = "测试中…"
-            // Provider follows the address when it is still a known preset host,
-            // so a stale pill selection cannot send a TypeSafe path to OpenRouter.
-            val provider = resolveJudgeProvider(judgeProviderIdx, base)
-            if (provider == Prefs.PROVIDER_CUSTOM && base.isBlank()) {
-                judgeResult.text = "自定义档要填完整 URL（带路径）"; return@cardBtn
-            }
-            // Custom means we know nothing about the endpoint — guessing a model
-            // name here would test something the user never asked for.
-            if (provider == Prefs.PROVIDER_CUSTOM && model.isBlank()) {
-                judgeResult.text = "请填写模型名"; return@cardBtn
-            }
-            val probe = draftPrefs(SCRATCH_JUDGE) {
-                judgeProvider = provider
-                judgeBaseUrl = base.ifBlank { defaultJudgeBase(provider) }
-                judgeKey = key
-                judgeModel = model.ifBlank { defaultJudgeModel(provider) }
-            }
+        judgeCard.addView(cardBtn("测试意图判断") {
+            val probe = judgeProbe(judgeResult, SCRATCH_JUDGE) ?: return@cardBtn
+            judgeResult.text = "测试中…" + cleartextNote(probe.judgeEndpoint())
             worker.execute {
                 val t0 = System.currentTimeMillis()
                 val demo = ChatSnapshot("连通测试", listOf(
@@ -186,28 +167,54 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
         })
+        // 沙盘推理 = the judge route's second half: rank fixed demo replies, so
+        // this button exercises ranking WITHOUT needing the reply route to work.
+        judgeCard.addView(cardBtn("测试沙盘推理") {
+            val probe = judgeProbe(judgeResult, SCRATCH_JUDGE_RANK) ?: return@cardBtn
+            judgeResult.text = "沙盘推理中…" + cleartextNote(probe.judgeEndpoint())
+            worker.execute {
+                val t0 = System.currentTimeMillis()
+                val demo = ChatSnapshot("连通测试", listOf(
+                    Msg("other", "在吗？"), Msg("me", "在")))
+                val candidates = listOf("嗯嗯在的，怎么啦？", "刚看到消息，稍等我忙完这阵", "在忙，晚点聊")
+                var err: String? = null
+                var ranked: List<RankedReply> = emptyList()
+                try { ranked = JudgeClient(probe).rank(demo, prefs.relationship, candidates) }
+                catch (e: Exception) { err = e.message ?: e.javaClass.simpleName }
+                val ms = System.currentTimeMillis() - t0
+                main.post {
+                    judgeResult.text = if (err != null) "失败（${ms}ms）：$err"
+                    else "成功 ${ms}ms · 沙盘排序：\n" + ranked.mapIndexed { i, r ->
+                        "${i + 1}. ${r.text}（${pct(r.prob)}）" }.joinToString("\n")
+                }
+            }
+        })
         judgeCard.addView(judgeResult)
         root.addView(judgeCard)
 
         // --- 回复接口 ---
         val replyCard = card()
         replyCard.addView(cardTitle("回复接口"))
-        replyCard.addView(text("生成 3 条候选回复。任何 OpenAI 兼容地址，填到 /v1 为止。", 12f, sub))
+        replyCard.addView(text("生成 3 条候选回复。任何 OpenAI 兼容地址：填到 /v1 为止，或直接粘完整的 /chat/completions 地址（局域网 http:// 的本机模型服务也可以）。", 12f, sub))
 
         val replyBaseEdit = edit(prefs.replyBaseUrl, Prefs.DEFAULT_REPLY_BASE)
         val replyModelEdit = edit(prefs.replyModel, Prefs.DEFAULT_REPLY_MODEL)
         val replyIdx = when (prefs.replyBaseUrl.trim().trimEnd('/')) {
-            Prefs.DEFAULT_REPLY_BASE -> 0
+            Prefs.GLM_BASE -> 0
             Prefs.DEEPSEEK_BASE -> 1
             Prefs.DASHSCOPE_BASE -> 2
             else -> 3
         }
         replyCard.addView(pills(
-            listOf("OpenRouter", "DeepSeek 官方", "通义兼容", "自定义"), replyIdx) { idx ->
+            listOf("智谱 GLM", "DeepSeek 官方", "通义兼容", "自定义"), replyIdx) { idx ->
             when (idx) {
-                0 -> { replyBaseEdit.setText(Prefs.DEFAULT_REPLY_BASE); replyModelEdit.setText(Prefs.DEFAULT_REPLY_MODEL) }
+                0 -> { replyBaseEdit.setText(Prefs.GLM_BASE); replyModelEdit.setText(Prefs.GLM_MODEL) }
                 1 -> { replyBaseEdit.setText(Prefs.DEEPSEEK_BASE); replyModelEdit.setText(Prefs.DEEPSEEK_MODEL) }
                 2 -> { replyBaseEdit.setText(Prefs.DASHSCOPE_BASE); replyModelEdit.setText(Prefs.DASHSCOPE_MODEL) }
+                // Custom POSTs the box verbatim (Prefs keeps a full endpoint
+                // as-is), so surface the derived path instead of leaving a
+                // preset base in the box masquerading as custom.
+                3 -> replyBaseEdit.setText(expandChatUrl(replyBaseEdit.text.toString()))
             }
         })
         replyCard.addView(label("Base URL"))
@@ -227,7 +234,7 @@ class SettingsActivity : AppCompatActivity() {
                 replyModel = model.ifBlank { Prefs.DEFAULT_REPLY_MODEL }
             }
             if (probe.effectiveReplyKey().isBlank()) { replyResult.text = "请先填密钥（或填判断接口密钥）"; return@cardBtn }
-            replyResult.text = "测试中…"
+            replyResult.text = "测试中…" + cleartextNote(probe.replyEndpoint())
             worker.execute {
                 val t0 = System.currentTimeMillis()
                 var err: String? = null
@@ -252,19 +259,23 @@ class SettingsActivity : AppCompatActivity() {
         val visionBaseEdit = edit(prefs.visionBaseUrl, Prefs.DEFAULT_VISION_BASE)
         val visionModelEdit = edit(prefs.visionModel, Prefs.DEFAULT_VISION_MODEL)
         val visionIdx = when (prefs.visionBaseUrl.trim().trimEnd('/')) {
-            Prefs.DEFAULT_VISION_BASE -> 0
-            Prefs.DASHSCOPE_BASE -> 1
-            else -> 2
+            Prefs.GLM_BASE -> 0
+            Prefs.DEEPSEEK_BASE -> 1
+            Prefs.DASHSCOPE_BASE -> 2
+            else -> 3
         }
         visionCard.addView(pills(
-            listOf("OpenRouter", "通义兼容", "自定义"), visionIdx) { idx ->
+            listOf("智谱 GLM", "DeepSeek 官方", "通义兼容", "自定义"), visionIdx) { idx ->
             when (idx) {
-                0 -> { visionBaseEdit.setText(Prefs.DEFAULT_VISION_BASE); visionModelEdit.setText(Prefs.DEFAULT_VISION_MODEL) }
-                1 -> { visionBaseEdit.setText(Prefs.DASHSCOPE_BASE); visionModelEdit.setText(Prefs.DASHSCOPE_VISION_MODEL) }
+                0 -> { visionBaseEdit.setText(Prefs.GLM_BASE); visionModelEdit.setText(Prefs.GLM_MODEL) }
+                1 -> { visionBaseEdit.setText(Prefs.DEEPSEEK_BASE); visionModelEdit.setText(Prefs.DEEPSEEK_VISION_MODEL) }
+                2 -> { visionBaseEdit.setText(Prefs.DASHSCOPE_BASE); visionModelEdit.setText(Prefs.DASHSCOPE_VISION_MODEL) }
+                3 -> visionBaseEdit.setText(expandChatUrl(visionBaseEdit.text.toString()))
             }
         })
         visionCard.addView(label("Base URL"))
         visionCard.addView(visionBaseEdit)
+        visionCard.addView(text("填到 /v1 为止，或粘完整 /chat/completions 地址。", 11f, sub))
         visionCard.addView(label("密钥"))
         visionCard.addView(edit(prefs.visionKey, "留空则用回复接口密钥", password = true).also { visionKeyEdit = it })
         visionCard.addView(label("模型"))
@@ -272,10 +283,6 @@ class SettingsActivity : AppCompatActivity() {
         val visionResult = resultText()
         visionCard.addView(cardBtn("测试视觉") {
             val visionBase = visionBaseEdit.text.toString().trim()
-            if (!VisionClient.supportsVision(visionBase.ifBlank { Prefs.DEFAULT_VISION_BASE })) {
-                visionResult.text = GUARD_NO_VISION
-                return@cardBtn
-            }
             val probe = draftPrefs(SCRATCH_VISION) {
                 judgeKey = judgeKeyEdit.text.toString().trim()
                 replyBaseUrl = replyBaseEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_REPLY_BASE }
@@ -285,7 +292,7 @@ class SettingsActivity : AppCompatActivity() {
                 visionModel = visionModelEdit.text.toString().trim().ifBlank { Prefs.DEFAULT_VISION_MODEL }
             }
             if (probe.effectiveVisionKey().isBlank()) { visionResult.text = "请先填密钥（或填回复/判断接口密钥）"; return@cardBtn }
-            visionResult.text = "测试中…"
+            visionResult.text = "测试中…" + cleartextNote(probe.visionEndpoint())
             worker.execute {
                 val t0 = System.currentTimeMillis()
                 var err: String? = null
@@ -301,6 +308,24 @@ class SettingsActivity : AppCompatActivity() {
         })
         visionCard.addView(visionResult)
         root.addView(visionCard)
+
+        // --- 微信（实验） ---
+        // WeChat hides its tree and FLAG_SECUREs the screen, so both classic
+        // channels are dead; v1.5 reads bubbles via the tree where possible and
+        // incoming messages via notification access, and never screenshots.
+        val wxCard = card()
+        wxCard.addView(cardTitle("微信（实验）"))
+        wxCard.addView(text("微信不截屏（防截屏会拦、且有风控风险）。优先读聊天气泡节点；读不到时读系统通知里的对方新消息，需要授予本 App「通知使用权」。填入失败会自动退回复制到剪贴板。", 12f, sub))
+        val wxRow = toggleRow("启用微信支持", prefs.wechatEnabled)
+        wxCard.addView(wxRow)
+        wxCard.addView(cardBtn("去开启通知使用权") {
+            runCatching {
+                startActivity(android.content.Intent(
+                    android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            }.onFailure { Toast.makeText(this, "打不开系统设置", Toast.LENGTH_SHORT).show() }
+        })
+        wxCard.addView(text("在列表里找到本 App 并打开。不给权限时气泡节点读取仍可用，只是通知通道不工作。", 11f, sub))
+        root.addView(wxCard)
 
         // =================== 分析 ===================
         root.addView(section("分析"))
@@ -430,6 +455,7 @@ class SettingsActivity : AppCompatActivity() {
             prefs.whitelist = wlEdit.text.toString().split("\n")
                 .map { it.trim() }.filter { it.isNotEmpty() }.toSet()
             prefs.autoAnalyze = (autoRow.tag as? Boolean) ?: true
+            prefs.wechatEnabled = (wxRow.tag as? Boolean) ?: true
             prefs.ocrFallback = (ocrFallbackRow.tag as? Boolean) ?: true
             prefs.ocrAutoAnalyze = (ocrAutoRow.tag as? Boolean) ?: false
             prefs.contextEnabled = (ctxRow.tag as? Boolean) ?: false
@@ -442,10 +468,13 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    // Held as fields because several test buttons read each other's key box.
+    // Held as fields because several test buttons read each other's key box,
+    // and both judge test buttons share the address / model boxes.
     private lateinit var judgeKeyEdit: EditText
     private lateinit var replyKeyEdit: EditText
     private lateinit var visionKeyEdit: EditText
+    private lateinit var judgeBaseEdit: EditText
+    private lateinit var judgeModelEdit: EditText
 
     private fun providerOf(idx: Int) = when (idx) {
         1 -> Prefs.PROVIDER_BOCHA
@@ -479,6 +508,37 @@ class SettingsActivity : AppCompatActivity() {
         else -> base.trim()
     }
 
+    /** Non-https endpoints are allowed (LAN/local models) but never silent about it. */
+    private fun cleartextNote(endpoint: String): String =
+        if (endpoint.startsWith("http://")) "（明文 http，仅建议局域网自建服务）" else ""
+
+    /**
+     * True when an address carries no path beyond scheme://host, so POSTing it
+     * would land on the API root. Blank counts as pathless: there is nothing to
+     * POST to at all. Scheme match is case-insensitive: `HTTP://HOST` must not
+     * slip through as "has a path" via its `://` slashes.
+     */
+    private fun isPathlessUrl(url: String): Boolean {
+        val t = url.trim().trimEnd('/')
+        if (t.isEmpty()) return true
+        val noScheme = t.lowercase().removePrefix("https://").removePrefix("http://")
+        return !noScheme.contains("/")
+    }
+
+    /**
+     * Show exactly what will be POSTed for an OpenAI-compatible route: the
+     * `/chat/completions` path the client would otherwise derive is appended
+     * visibly (a full URL already carrying it passes through untouched). The
+     * append rule is [Prefs.appendChatCompletions] — the same one the real
+     * request runs — so the preview can never diverge from the POST target.
+     * Blank stays blank so the box visibly asks for the fallback preset.
+     */
+    private fun expandChatUrl(base: String): String {
+        val b = base.trim().trimEnd('/')
+        if (b.isEmpty()) return b
+        return Prefs.appendChatCompletions(b)
+    }
+
     private fun defaultJudgeBase(provider: String): String = when (provider) {
         Prefs.PROVIDER_BOCHA -> Prefs.DEFAULT_JUDGE_BASE_BOCHA
         Prefs.PROVIDER_TYPESAFE -> Prefs.DEFAULT_JUDGE_BASE_TYPESAFE
@@ -503,6 +563,36 @@ class SettingsActivity : AppCompatActivity() {
     private fun draftPrefs(scratchName: String, fill: Prefs.() -> Unit): Prefs {
         getSharedPreferences(scratchName, MODE_PRIVATE).edit().clear().commit()
         return Prefs(this, scratchName).apply(fill)
+    }
+
+    /**
+     * The judge-route probe config for the two judge test buttons, or null after
+     * writing the blocker into [result]. One shared validation so the intent and
+     * sandbox buttons cannot drift apart: a preset host in the address box pins
+     * its own provider (a stale pill selection must not send a TypeSafe path to
+     * OpenRouter), custom needs a pathed URL and an explicit model name, blank
+     * falls back to THIS provider's preset — never OpenRouter's by default.
+     */
+    private fun judgeProbe(result: TextView, scratch: String): Prefs? {
+        val base = judgeBaseEdit.text.toString().trim()
+        val key = judgeKeyEdit.text.toString().trim()
+        val model = judgeModelEdit.text.toString().trim()
+        if (key.isBlank()) { result.text = "请先填密钥"; return null }
+        val provider = resolveJudgeProvider(judgeProviderIdx, base)
+        if (provider == Prefs.PROVIDER_CUSTOM && isPathlessUrl(base)) {
+            result.text = "自定义档要填完整 URL（带路径）"; return null
+        }
+        // Custom means we know nothing about the endpoint — guessing a model
+        // name here would test something the user never asked for.
+        if (provider == Prefs.PROVIDER_CUSTOM && model.isBlank()) {
+            result.text = "请填写模型名"; return null
+        }
+        return draftPrefs(scratch) {
+            judgeProvider = provider
+            judgeBaseUrl = base.ifBlank { defaultJudgeBase(provider) }
+            judgeKey = key
+            judgeModel = model.ifBlank { defaultJudgeModel(provider) }
+        }
     }
 
     /** Opens an external link; swallows the failure with a toast rather than crashing. */
@@ -656,12 +746,9 @@ class SettingsActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "JEVASSIST"
 
-        /** DeepSeek's official API has no vision model; say so instead of a 400. */
-        private const val GUARD_NO_VISION =
-            "该接口不支持视觉（DeepSeek 官方没有 image_url），请换 OpenRouter 或通义兼容"
-
         /** One scratch prefs file per test button; never the real config. */
         private const val SCRATCH_JUDGE = "jev_probe_scratch_judge"
+        private const val SCRATCH_JUDGE_RANK = "jev_probe_scratch_judge_rank"
         private const val SCRATCH_REPLY = "jev_probe_scratch_reply"
         private const val SCRATCH_VISION = "jev_probe_scratch_vision"
 

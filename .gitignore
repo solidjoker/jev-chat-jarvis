@@ -23,6 +23,9 @@ gradle.properties.local
 /tools/jev/__pycache__/
 **/__pycache__/
 *.pyc
+.video_agent/
+/out/
+.zcodeignore
 
 # OS
 .DS_Store
@@ -34,6 +37,11 @@ secrets.*
 
 # Prebuilt APK for direct install (tracked on purpose)
 !/apk/*.apk
+# …except the private build, which embeds API keys. Never tracked, never uploaded.
+/apk/*private*.apk
+
+# Private build key source — baked into the private APK only
+apikey.toml
 
 # Signing material never enters the repo
 *.jks
