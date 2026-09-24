@@ -97,8 +97,20 @@ open class ChatCaptureService : AccessibilityService() {
         super.onServiceConnected()
         prefs = Prefs(this)
         overlay = OverlayController(this)
+        // Panel → "分析当前对话". currentSnapshot can be null here (fresh
+        // service start, WeChat's hidden tree with an empty notification
+        // buffer, the conversation list screen) — a dead button is exactly what
+        // a manual tap must never be, so take one fresh shot at reading the
+        // screen before giving up with a reason.
         overlay?.onManualAnalyze = {
-            currentSnapshot?.let { pendingSnapshot = it; runAnalysis() }
+            val snap = currentSnapshot ?: grabSnapshotForManualAnalyze()
+            if (snap == null) {
+                overlay?.toast("没读到当前对话：先打开聊天窗口；微信可开「通知使用权」，对方来消息即可分析")
+            } else {
+                currentSnapshot = snap
+                pendingSnapshot = snap
+                runAnalysis()
+            }
         }
         // Bubble menu: file the open conversation as a knowledge-base contact.
         // Contacts are never created automatically — this is the one-tap way in.
@@ -264,6 +276,26 @@ open class ChatCaptureService : AccessibilityService() {
         pendingSnapshot = snapshot
         main.removeCallbacks(debounce)
         main.postDelayed(debounce, 800) // debounce bursts of content-changed events
+    }
+
+    /**
+     * A fresh one-shot read backing the manual "分析当前对话" button when no
+     * snapshot is on file. Same preference rules as the automatic path — WeChat
+     * gated by its setting, whitelist respected — and WeChat still never gets
+     * screenshotted: an unreadable tree falls back to the notification buffer.
+     * Null = nothing on screen worth analyzing.
+     */
+    private fun grabSnapshotForManualAnalyze(): ChatSnapshot? {
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString() ?: return null
+        if (pkg == PKG_WECHAT && !prefs.wechatEnabled) return null
+        val adapter = adapters[pkg] ?: return null
+        val raw = adapter.extract(root, resources) ?: return null
+        val snap = stabilizeTitle(pkg, raw)
+        if (!prefs.isAllowed(snap.title)) return null
+        if (snap.messages.isNotEmpty()) return snap
+        if (pkg == PKG_WECHAT) return WeChatNotifyStore.snapshotFor(snap.title)
+        return null
     }
 
     /**
